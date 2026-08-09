@@ -1,0 +1,220 @@
+<!DOCTYPE html>
+<html lang="nl">
+<head>
+<meta charset="UTF-8">
+<title>Overzicht — Prototype</title>
+<style>
+  * { box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    background: #f0f0f1; margin: 0; padding: 2rem; color: #1d2327;
+  }
+  .wrap { max-width: 900px; margin: 0 auto; }
+  h1 { display: flex; align-items: center; gap: .5rem; font-size: 1.5rem; margin: 0 0 .25rem; }
+  h1 .dash { font-size: 1.5rem; }
+  .sub { color: #888; font-size: .85rem; margin: 0 0 1.5rem; }
+
+  .prototype-banner {
+    background: #fff8e1; border: 1px solid #ffe08a; border-radius: 8px;
+    padding: .75rem 1rem; font-size: .82rem; color: #7a5c00; margin-bottom: 1.5rem;
+  }
+
+  .stat-row { display: flex; gap: 1rem; margin-bottom: 1.5rem; flex-wrap: wrap; }
+  .stat-tile {
+    background: #fff; border: 1px solid #e0e0e0; border-radius: 10px;
+    padding: 1rem 1.5rem; min-width: 110px; text-align: center;
+    box-shadow: 0 1px 4px rgba(0,0,0,.06);
+  }
+  .stat-tile .n { font-size: 2rem; font-weight: 700; color: #2d3a4a; line-height: 1; }
+  .stat-tile .l { font-size: .75rem; color: #888; margin-top: .25rem; }
+
+  .filter-chips {
+    display: flex; align-items: center; gap: .5rem; flex-wrap: wrap;
+    margin-bottom: 1.25rem; min-height: 28px;
+  }
+  .filter-chips .hint { font-size: .78rem; color: #aaa; }
+  .chip {
+    display: inline-flex; align-items: center; gap: .4rem;
+    background: #2d3a4a; color: #fff; border-radius: 50px;
+    padding: .3rem .5rem .3rem .85rem; font-size: .78rem; font-weight: 600;
+  }
+  .chip button {
+    background: rgba(255,255,255,.2); border: none; color: #fff;
+    width: 18px; height: 18px; border-radius: 50%; cursor: pointer;
+    font-size: .7rem; line-height: 1; display: flex; align-items: center; justify-content: center;
+  }
+  .chip button:hover { background: rgba(255,255,255,.35); }
+  .clear-all { font-size: .78rem; color: #d32f2f; cursor: pointer; text-decoration: underline; background: none; border: none; }
+
+  .section {
+    background: #fff; border: 1px solid #e0e0e0; border-radius: 10px;
+    padding: 1.25rem 1.5rem; margin-bottom: 1.25rem;
+    box-shadow: 0 1px 4px rgba(0,0,0,.06);
+  }
+  .section h2 {
+    font-size: .78rem; font-weight: 700; text-transform: uppercase; letter-spacing: .08em;
+    color: #2d3a4a; margin: 0 0 1rem;
+  }
+  .bar-row {
+    display: flex; align-items: center; gap: .75rem; padding: .4rem 0;
+    cursor: pointer; border-radius: 8px; transition: background .15s;
+  }
+  .bar-row:hover { background: #f7f8f9; }
+  .bar-row.active { background: #f4f6f8; }
+  .bar-label {
+    width: 190px; flex-shrink: 0; font-size: .84rem; color: #333;
+    display: flex; align-items: center; gap: .4rem;
+  }
+  .bar-row.active .bar-label { font-weight: 700; color: #2d3a4a; }
+  .bar-track { flex: 1; background: #eef0f2; border-radius: 6px; height: 20px; position: relative; overflow: hidden; }
+  .bar-fill { background: #6b8299; height: 100%; border-radius: 6px; transition: width .3s; }
+  .bar-row.active .bar-fill { background: #2d3a4a; }
+  .bar-fill.full { background: #d32f2f; }
+  .bar-count { width: 90px; flex-shrink: 0; text-align: right; font-size: .82rem; color: #555; font-variant-numeric: tabular-nums; }
+  .vol-badge {
+    background: #fdeaea; color: #d32f2f; font-size: .68rem; font-weight: 700;
+    padding: 1px 7px; border-radius: 50px; text-transform: uppercase; letter-spacing: .03em;
+  }
+  .rooster-hint { font-size: .8rem; color: #aaa; font-style: italic; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <div class="prototype-banner">
+    🔧 <strong>Prototype</strong> — synthetic data, click bars to filter/drill down. Not wired to the real database yet. For reacting-to purposes only, per the "What should the enrollment dashboard look like?" ticket.
+  </div>
+
+  <h1><span class="dash">📊</span> Overzicht</h1>
+  <p class="sub">Nieuw sub-menu onder "Inschrijvingen" — klik op een balk om te filteren, klik nogmaals om uit te zetten.</p>
+
+  <div class="stat-row">
+    <div class="stat-tile"><div class="n" id="stat-totaal">–</div><div class="l">Totaal (gefilterd)</div></div>
+  </div>
+
+  <div class="filter-chips" id="chips">
+    <span class="hint">Geen filters actief — klik op een balk hieronder</span>
+  </div>
+
+  <div class="section">
+    <h2>Categorie</h2>
+    <div id="bars-categorie"></div>
+  </div>
+
+  <div class="section">
+    <h2>Niveau</h2>
+    <div id="bars-niveau"></div>
+  </div>
+
+  <div class="section" id="section-rooster" style="display:none">
+    <h2>Lesdagen (rooster) — capaciteit 30 per tijdslot</h2>
+    <div id="bars-rooster"></div>
+  </div>
+  <p class="rooster-hint" id="rooster-hint">Klik op "Kinderen" bij Categorie om de lesdagen-bezetting te zien.</p>
+
+</div>
+
+<script>
+  // ── Synthetic dataset (114 rows) — mimics wp_arrahma_inschrijvingen shape ──
+  const CATEGORIEEN = ['kinderen','tieners_broeders','tieners_zusters','zusters_18plus','broeders_18plus'];
+  const CATEGORIE_LABELS = {
+    kinderen: 'Kinderen (6–11)', tieners_broeders: 'Tieners — Broeders (12–17)',
+    tieners_zusters: 'Tieners — Zusters (12–17)', zusters_18plus: 'Zusters 18+', broeders_18plus: 'Broeders 18+',
+  };
+  const NIVEAUS = ['instroom','basis','gevorderd'];
+  const NIVEAU_LABELS = { instroom: 'Instroomniveau', basis: 'Basisniveau', gevorderd: 'Gevorderd niveau' };
+  const ROOSTERS = ['za_zo_blok1','za_zo_blok2','za_zo_blok3','ma_wo','di_do'];
+  const ROOSTER_LABELS = {
+    za_zo_blok1: 'Zaterdag & zondag — blok 1 (09:00–11:00)', za_zo_blok2: 'Zaterdag & zondag — blok 2 (11:15–13:15)',
+    za_zo_blok3: 'Zaterdag & zondag — blok 3 (13:30–15:30)', ma_wo: 'Maandag & woensdag (15:30–17:30)',
+    di_do: 'Dinsdag & donderdag (15:30–17:30)',
+  };
+  const CAP = 30;
+
+  // Weighted synthetic distribution, deterministic (no Math.random) so the prototype is stable to look at.
+  const catCounts = { kinderen: 62, tieners_broeders: 18, tieners_zusters: 14, zusters_18plus: 9, broeders_18plus: 11 };
+  const rows = [];
+  let seed = 7;
+  function nextPick(arr) { seed = (seed * 1103515245 + 12345) % 2147483648; return arr[seed % arr.length]; }
+  const roosterWeights = ['za_zo_blok1','za_zo_blok1','za_zo_blok2','za_zo_blok2','za_zo_blok2','za_zo_blok3','ma_wo','di_do'];
+  const niveauWeights  = ['instroom','instroom','basis','basis','basis','gevorderd'];
+
+  Object.entries(catCounts).forEach(([cat, n]) => {
+    for (let i = 0; i < n; i++) {
+      rows.push({
+        categorie: cat,
+        niveau: nextPick(niveauWeights),
+        rooster: cat === 'kinderen' ? nextPick(roosterWeights) : '',
+      });
+    }
+  });
+  // Force one slot to be at/near capacity so the "Vol" state is visible in the prototype.
+  let blok1Count = rows.filter(r => r.rooster === 'za_zo_blok1').length;
+  while (blok1Count < CAP) { rows.push({ categorie: 'kinderen', niveau: nextPick(niveauWeights), rooster: 'za_zo_blok1' }); blok1Count++; }
+
+  // ── Filter state (stacked, one value per dimension at a time — dimensions AND together) ──
+  const activeFilters = {}; // { categorie: 'kinderen', niveau: 'basis' }
+
+  function matchesFilters(row, excludeDim) {
+    return Object.entries(activeFilters).every(([dim, val]) => dim === excludeDim || row[dim] === val);
+  }
+
+  function toggleFilter(dim, val) {
+    if (activeFilters[dim] === val) delete activeFilters[dim];
+    else activeFilters[dim] = val;
+    render();
+  }
+
+  function clearAll() { for (const k in activeFilters) delete activeFilters[k]; render(); }
+
+  function renderChips() {
+    const el = document.getElementById('chips');
+    const entries = Object.entries(activeFilters);
+    if (entries.length === 0) {
+      el.innerHTML = '<span class="hint">Geen filters actief — klik op een balk hieronder</span>';
+      return;
+    }
+    const labels = { categorie: CATEGORIE_LABELS, niveau: NIVEAU_LABELS, rooster: ROOSTER_LABELS };
+    el.innerHTML = entries.map(([dim, val]) =>
+      `<span class="chip">${labels[dim][val]} <button onclick="toggleFilter('${dim}','${val}')">✕</button></span>`
+    ).join('') + `<button class="clear-all" onclick="clearAll()">Wis alles</button>`;
+  }
+
+  function renderSection(dim, values, labels, containerId, capped) {
+    const container = document.getElementById(containerId);
+    const counted = values.map(v => ({
+      value: v,
+      count: rows.filter(r => r[v === '__self' ? dim : dim] === v && matchesFilters(r, dim)).length,
+    }));
+    const max = Math.max(...counted.map(c => c.count), 1);
+    container.innerHTML = counted.map(({ value, count }) => {
+      const pct = Math.round((count / (capped ? CAP : max)) * 100);
+      const isActive = activeFilters[dim] === value;
+      const isFull = capped && count >= CAP;
+      return `
+        <div class="bar-row ${isActive ? 'active' : ''}" onclick="toggleFilter('${dim}','${value}')">
+          <div class="bar-label">${labels[value]} ${isFull ? '<span class="vol-badge">Vol</span>' : ''}</div>
+          <div class="bar-track"><div class="bar-fill ${isFull ? 'full' : ''}" style="width:${Math.min(pct,100)}%"></div></div>
+          <div class="bar-count">${count}${capped ? ' / ' + CAP : ''}</div>
+        </div>`;
+    }).join('');
+  }
+
+  function render() {
+    renderChips();
+    renderSection('categorie', CATEGORIEEN, CATEGORIE_LABELS, 'bars-categorie', false);
+    renderSection('niveau', NIVEAUS, NIVEAU_LABELS, 'bars-niveau', false);
+
+    const kinderenActive = activeFilters.categorie === 'kinderen';
+    document.getElementById('section-rooster').style.display = kinderenActive ? 'block' : 'none';
+    document.getElementById('rooster-hint').style.display = kinderenActive ? 'none' : 'block';
+    if (kinderenActive) renderSection('rooster', ROOSTERS, ROOSTER_LABELS, 'bars-rooster', true);
+
+    const total = rows.filter(r => matchesFilters(r, null)).length;
+    document.getElementById('stat-totaal').textContent = total;
+  }
+
+  render();
+</script>
+</body>
+</html>

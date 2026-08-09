@@ -1,0 +1,1793 @@
+
+<!--
+=============================================================
+  INSCHRIJFFORMULIER — MEERSTAPS REGISTRATIEFORMULIER
+  Vereniging Arrahma
+=============================================================
+
+HOE TE EMBEDDEN IN ELEMENTOR:
+1. Ga naar de pagina in Elementor
+2. Voeg een "HTML" widget toe (zoek op "HTML" in de widget-lijst)
+3. Plak de volledige inhoud van dit bestand in het HTML-veld
+4. Klik op "Update"
+
+ENDPOINT:
+Het formulier verstuurt naar:
+  https://www.vereniging-arrahma.nl/wp-json/arrahma/v1/inschrijving
+Zorg dat de plugin "Arrahma Inschrijvingen" geactiveerd is in WordPress → Plugins.
+=============================================================
+-->
+<style>
+  .msf-wrapper {
+      
+    font-family: inherit;
+    color: #333;
+    max-width: 720px;
+    margin: 0 auto;
+    padding: 0 1rem;
+    box-sizing: border-box;
+  }
+
+  /* ── Progress ── */
+  .msf-progress {
+    display: flex;
+    align-items: flex-start;
+    margin-bottom: 2.5rem;
+  }
+  .msf-step-indicator {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    flex: 1;
+    position: relative;
+  }
+  .msf-step-indicator:not(:last-child)::after {
+    content: '';
+    position: absolute;
+    top: 17px;
+    left: 50%;
+    width: 100%;
+    height: 2px;
+    background: #ddd;
+    z-index: 0;
+    transition: background 0.4s;
+  }
+  .msf-step-indicator.completed:not(:last-child)::after { background: #2d3a4a; }
+  .msf-bubble {
+    width: 34px; height: 34px;
+    border-radius: 50%;
+    background: #fff;
+    border: 2px solid #ddd;
+    color: #aaa;
+    display: flex; align-items: center; justify-content: center;
+    font-weight: 700; font-size: 0.82rem;
+    position: relative; z-index: 1;
+    transition: all 0.3s;
+  }
+  .msf-step-indicator.active .msf-bubble  { background: #2d3a4a; border-color: #2d3a4a; color: #fff; }
+  .msf-step-indicator.completed .msf-bubble { background: #2d3a4a; border-color: #2d3a4a; color: #fff; opacity: .55; }
+  .msf-step-label {
+    font-size: 0.68rem; margin-top: 6px;
+    color: #aaa; text-align: center; letter-spacing: .02em;
+  }
+  .msf-step-indicator.active .msf-step-label    { color: #2d3a4a; font-weight: 600; }
+  .msf-step-indicator.completed .msf-step-label { color: #2d3a4a; opacity: .6; }
+
+  /* ── Panels ── */
+  .msf-step-panel { display: none; }
+  .msf-step-panel.active { display: block; }
+  .msf-step-title { font-size: 1.25rem; font-weight: 700; margin: 0 0 .3rem; color: #1a1a1a; }
+  .msf-step-sub   { font-size: .88rem; color: #888; margin: 0 0 1.75rem; }
+
+  /* ── Radio cards ── */
+  .msf-radio-group { display: flex; flex-direction: column; gap: .65rem; }
+  .msf-radio-card {
+    display: flex; align-items: center; gap: 1rem;
+    border: 1.5px solid #d8d8d8; border-radius: 50px;
+    padding: .85rem 1.25rem;
+    cursor: pointer; user-select: none; background: #fff;
+    transition: border-color .2s, background .2s;
+  }
+  .msf-radio-card:hover { border-color: #2d3a4a; }
+  .msf-radio-card.selected { border-color: #2d3a4a; background: #f4f6f8; }
+  .msf-radio-card input[type="radio"] { accent-color: #2d3a4a; width: 17px; height: 17px; flex-shrink: 0; cursor: pointer; }
+  .msf-radio-card-text strong { display: block; font-size: .92rem; font-weight: 600; color: #1a1a1a; }
+  .msf-radio-card-text span   { font-size: .8rem; color: #888; }
+  .msf-radio-card:has(input:disabled) { opacity: .5; cursor: not-allowed; background: #f7f7f7; }
+  .msf-radio-card:has(input:disabled):hover { border-color: #d8d8d8; }
+  .vol-badge {
+    display: inline-block; margin-left: .5rem; padding: 1px 8px;
+    background: #fdeaea; color: #d32f2f; font-size: .68rem; font-weight: 700;
+    border-radius: 50px; text-transform: uppercase; letter-spacing: .03em; vertical-align: middle;
+  }
+
+  /* ── Form rows & fields ── */
+  .msf-row { display: grid; gap: .85rem; margin-bottom: .85rem; }
+  .msf-row.col-2 { grid-template-columns: 1fr 1fr; }
+  .msf-row.col-1 { grid-template-columns: 1fr; }
+  .msf-field { display: flex; flex-direction: column; gap: .3rem; }
+  .msf-field label { font-size: .82rem; font-weight: 600; color: #555; padding-left: .75rem; }
+  .msf-field input, .msf-field select {
+    padding: .65rem 1.1rem;
+    border: 1.5px solid #d8d8d8; border-radius: 50px;
+    font-size: .9rem; font-family: inherit; color: #333; background: #fff;
+    width: 100%; box-sizing: border-box;
+    appearance: none; -webkit-appearance: none; outline: none;
+    transition: border-color .2s;
+  }
+  .msf-field input:focus, .msf-field select:focus { border-color: #2d3a4a; }
+  .msf-field input.error { border-color: #d32f2f; }
+  /* Date inputs need native appearance to show the picked date and calendar icon */
+  .msf-field input[type="date"] {
+    appearance: auto;
+    -webkit-appearance: auto;
+    padding-right: 0.5rem;
+  }
+  .msf-field-error { font-size: .76rem; color: #d32f2f; padding-left: .75rem; display: none; }
+  .msf-field-error.visible { display: block; }
+
+  /* ── Section label ── */
+  .msf-section-label {
+    font-size: .75rem; font-weight: 700;
+    text-transform: uppercase; letter-spacing: .08em;
+    color: #aaa; margin: 1.25rem 0 .75rem;
+  }
+
+  /* ── Info box ── */
+  .msf-info-box {
+    background: #f4f6f8; border-left: 3px solid #2d3a4a;
+    border-radius: 0 8px 8px 0; padding: .85rem 1rem;
+    font-size: .86rem; color: #555; margin-bottom: 1.25rem; line-height: 1.6;
+  }
+
+  /* ── Collapsible reference (niveaus & lesdagen) ── */
+  .msf-details {
+    border: 1px solid #e2e5e9; border-radius: 12px;
+    background: #fbfcfd; margin-bottom: 1.25rem; overflow: hidden;
+  }
+  .msf-details > summary {
+    list-style: none; cursor: pointer;
+    padding: .8rem 1rem; font-size: .86rem; font-weight: 600; color: #2d3a4a;
+    display: flex; align-items: center;
+  }
+  .msf-details > summary::-webkit-details-marker { display: none; }
+  .msf-details > summary::after {
+    content: "\002B"; margin-left: auto;
+    font-size: 1.1rem; font-weight: 400; color: #888; line-height: 1;
+  }
+  .msf-details[open] > summary::after { content: "\2212"; }
+  .msf-details-body {
+    padding: 0 1rem 1rem; font-size: .84rem; color: #555; line-height: 1.55;
+  }
+  .msf-details-body h4 {
+    margin: 1rem 0 .35rem; font-size: .7rem; font-weight: 700;
+    letter-spacing: .08em; text-transform: uppercase; color: #2d3a4a;
+  }
+  .msf-ref-table { width: 100%; border-collapse: collapse; }
+  .msf-ref-table td {
+    padding: .35rem .5rem; border-bottom: 1px solid #eef0f2; vertical-align: top;
+  }
+  .msf-ref-table td:first-child {
+    font-weight: 600; color: #1a1a1a; width: 40%;
+  }
+  .msf-ref-table tr:last-child td { border-bottom: none; }
+
+  /* ── Toggle checkbox (contact person) ── */
+  .msf-toggle-row {
+    display: flex; align-items: flex-start; gap: .75rem;
+    padding: .9rem 1.1rem; margin-bottom: 1rem;
+    border: 1.5px solid #d8d8d8; border-radius: 14px;
+    background: #fff; cursor: pointer;
+    transition: border-color .2s, background .2s;
+  }
+  .msf-toggle-row.active { border-color: #2d3a4a; background: #f4f6f8; }
+  .msf-toggle-row input[type="checkbox"] {
+    accent-color: #2d3a4a; width: 17px; height: 17px;
+    flex-shrink: 0; margin-top: 2px; cursor: pointer;
+  }
+  .msf-toggle-row label { font-size: .86rem; line-height: 1.5; cursor: pointer; color: #444; }
+  .msf-toggle-row label strong { display: block; color: #1a1a1a; margin-bottom: .1rem; }
+
+  /* ── Contact person section (hidden by default) ── */
+  .msf-contactpersoon-section {
+    display: none;
+    border: 1.5px solid #2d3a4a; border-radius: 12px;
+    padding: 1rem 1.1rem; margin-bottom: 1rem;
+    background: #f9fafb;
+  }
+  .msf-contactpersoon-section.visible { display: block; }
+  .msf-contactpersoon-section .msf-section-label { margin-top: 0; color: #2d3a4a; opacity: .8; }
+
+  /* ── Checkbox rows (step 4) ── */
+  .msf-check-row {
+    display: flex; align-items: flex-start; gap: .75rem;
+    margin-bottom: .85rem; padding: .85rem 1.1rem;
+    border: 1.5px solid #d8d8d8; border-radius: 14px;
+    background: #fff; transition: border-color .2s;
+  }
+  .msf-check-row:has(input:checked) { border-color: #2d3a4a; background: #f4f6f8; }
+  .msf-check-row input[type="checkbox"] { accent-color: #2d3a4a; width: 17px; height: 17px; flex-shrink: 0; margin-top: 2px; cursor: pointer; }
+  .msf-check-row label { font-size: .86rem; line-height: 1.55; cursor: pointer; color: #444; }
+
+  /* ── Nav buttons ── */
+  .msf-nav { display: flex; justify-content: space-between; align-items: center; margin-top: 1.75rem; }
+  .msf-btn {
+    padding: .65rem 2rem; border-radius: 50px;
+    font-size: .85rem; font-weight: 700; letter-spacing: .05em; text-transform: uppercase;
+    cursor: pointer; font-family: inherit; border: 2px solid transparent;
+    transition: all .2s;
+  }
+  .msf-btn-primary { background: #fff; color: #2d3a4a; border-color: #2d3a4a; margin-left: auto; }
+  .msf-btn-primary:hover {
+    background: #2d3a4a !important; color: #fff !important; border-color: #2d3a4a !important;
+  }
+  .msf-btn-secondary { background: transparent; color: #aaa; border-color: #ddd; }
+  .msf-btn-secondary:hover {
+    background: transparent !important; border-color: #aaa !important; color: #555 !important;
+  }
+  .msf-btn:disabled { opacity: .5; cursor: not-allowed; }
+
+  .msf-step-error { color: #d32f2f; font-size: .83rem; margin-top: .75rem; display: none; }
+
+  /* ── Success ── */
+  .msf-success { display: none; text-align: center; padding: 3rem 1rem; }
+  .msf-success.visible { display: block; }
+  .msf-success-icon { font-size: 2.5rem; margin-bottom: 1rem; }
+  .msf-success h2 { font-size: 1.3rem; font-weight: 700; margin-bottom: .5rem; color: #1a1a1a; }
+  .msf-success p { color: #777; font-size: .92rem; }
+  .msf-success-again {
+    margin-top: 2rem; padding-top: 1.5rem; border-top: 1px solid #eef0f2;
+    display: flex; flex-direction: column; align-items: center; gap: 1rem;
+  }
+  .msf-keepbank {
+    display: flex; align-items: center; gap: .5rem;
+    font-size: .85rem; color: #555; cursor: pointer;
+  }
+  .msf-keepbank input { accent-color: #2d3a4a; width: 16px; height: 16px; cursor: pointer; }
+
+  /* ── Mode toggle (single vs meerdere kinderen) ── */
+  .msf-mode-toggle {
+    display: flex; gap: .35rem;
+    background: #f4f6f8; padding: .3rem;
+    border-radius: 50px; margin-bottom: .5rem;
+  }
+  .msf-mode-btn {
+    flex: 1; padding: .6rem 1rem;
+    border: none; background: transparent; border-radius: 50px;
+    font-family: inherit; font-size: .84rem; font-weight: 600; color: #888;
+    cursor: pointer; transition: background .2s, color .2s;
+  }
+  .msf-mode-btn:hover { background: #e9edf1 !important; color: #2d3a4a !important; }
+  .msf-mode-btn.active,
+  .msf-mode-btn.active:hover {
+    background: #2d3a4a !important; color: #fff !important;
+  }
+
+  /* ── Child cards (bulk) ── */
+  .msf-child-card {
+    border: 1.5px solid #d8d8d8; border-radius: 14px;
+    padding: 1rem 1.1rem; margin-bottom: 1rem; background: #fff;
+  }
+  .msf-child-card-head {
+    display: flex; align-items: center; justify-content: space-between;
+    margin-bottom: .85rem;
+  }
+  .msf-child-card-head strong { font-size: .95rem; color: #1a1a1a; }
+  .msf-child-remove {
+    background: none; border: none; color: #d32f2f;
+    font-size: .78rem; font-family: inherit; cursor: pointer;
+    padding: .2rem .35rem; display: inline-flex; align-items: center; gap: .25rem;
+  }
+  .msf-child-remove:hover { text-decoration: underline; }
+  .msf-add-child {
+    width: 100%; padding: .8rem;
+    border: 1.5px dashed #2d3a4a; background: #f4f6f8; color: #2d3a4a;
+    border-radius: 12px; font-family: inherit; font-weight: 600; font-size: .85rem;
+    cursor: pointer; transition: background .2s; margin-bottom: .5rem;
+  }
+  .msf-add-child:hover { background: #e9edf1; }
+
+  @media (max-width: 560px) {
+    .msf-row.col-2 { grid-template-columns: 1fr; }
+    .msf-step-label { display: none; }
+    .msf-btn { padding: .6rem 1.25rem; font-size: .8rem; }
+  }
+</style>
+
+<div class="msf-wrapper">
+
+  <!-- Progress -->
+  <div class="msf-progress" id="msfProgress">
+    <div class="msf-step-indicator active" data-step="1">
+      <div class="msf-bubble">1</div>
+      <div class="msf-step-label">Voor wie</div>
+    </div>
+    <div class="msf-step-indicator" data-step="2">
+      <div class="msf-bubble">2</div>
+      <div class="msf-step-label">Gegevens</div>
+    </div>
+    <div class="msf-step-indicator" data-step="3">
+      <div class="msf-bubble">3</div>
+      <div class="msf-step-label">Niveau</div>
+    </div>
+    <div class="msf-step-indicator" data-step="4">
+      <div class="msf-bubble">4</div>
+      <div class="msf-step-label">Lesdagen</div>
+    </div>
+    <div class="msf-step-indicator" data-step="5">
+      <div class="msf-bubble">5</div>
+      <div class="msf-step-label">Akkoord</div>
+    </div>
+  </div>
+
+  <!-- Progress (bulk / meerdere kinderen) -->
+  <div class="msf-progress" id="msfProgressBulk" style="display:none">
+    <div class="msf-step-indicator active" data-step="1">
+      <div class="msf-bubble">1</div>
+      <div class="msf-step-label">Start</div>
+    </div>
+    <div class="msf-step-indicator" data-step="2">
+      <div class="msf-bubble">2</div>
+      <div class="msf-step-label">Kinderen</div>
+    </div>
+    <div class="msf-step-indicator" data-step="3">
+      <div class="msf-bubble">3</div>
+      <div class="msf-step-label">Contact</div>
+    </div>
+    <div class="msf-step-indicator" data-step="4">
+      <div class="msf-bubble">4</div>
+      <div class="msf-step-label">Akkoord</div>
+    </div>
+  </div>
+
+  <!-- ══════════════ STAP 1 ══════════════ -->
+  <div class="msf-step-panel active" id="step1">
+    <p class="msf-step-title">Inschrijven</p>
+    <p class="msf-step-sub">Schrijf één persoon in, of meerdere kinderen tegelijk.</p>
+
+    <div class="msf-mode-toggle">
+      <button type="button" class="msf-mode-btn active" data-mode="single" onclick="setMode('single')">Eén inschrijving</button>
+      <button type="button" class="msf-mode-btn" data-mode="bulk" onclick="setMode('bulk')">Meerdere kinderen</button>
+    </div>
+
+    <!-- Bulk toelichting -->
+    <div class="msf-info-box" id="bulkNote" style="display:none;margin-top:1.25rem">
+      Je schrijft <strong>meerdere kinderen (6 t/m 11 jaar)</strong> in met één set contact- en betaalgegevens. In de volgende stap voeg je elk kind afzonderlijk toe.
+    </div>
+
+    <!-- Categorie (alleen bij één inschrijving) -->
+    <div id="categoryGroup">
+      <p class="msf-section-label" style="margin-top:1.5rem">Voor wie wil je je inschrijven?</p>
+
+      <div class="msf-radio-group">
+
+      <label class="msf-radio-card">
+        <input type="radio" name="inschrijving_voor" value="kinderen">
+        <div class="msf-radio-card-text">
+          <strong>Kinderen</strong>
+          <span>6 t/m 11 jaar</span>
+        </div>
+      </label>
+
+      <label class="msf-radio-card">
+        <input type="radio" name="inschrijving_voor" value="tieners_broeders">
+        <div class="msf-radio-card-text">
+          <strong>Tieners — Broeders</strong>
+          <span>12 tot 17 jaar</span>
+        </div>
+      </label>
+
+      <label class="msf-radio-card">
+        <input type="radio" name="inschrijving_voor" value="tieners_zusters">
+        <div class="msf-radio-card-text">
+          <strong>Tieners — Zusters</strong>
+          <span>12 tot 17 jaar</span>
+        </div>
+      </label>
+
+      <label class="msf-radio-card">
+        <input type="radio" name="inschrijving_voor" value="zusters_18plus">
+        <div class="msf-radio-card-text">
+          <strong>Zusters</strong>
+          <span>18 jaar en ouder</span>
+        </div>
+      </label>
+
+      <label class="msf-radio-card">
+        <input type="radio" name="inschrijving_voor" value="broeders_18plus">
+        <div class="msf-radio-card-text">
+          <strong>Broeders</strong>
+          <span>18 jaar en ouder</span>
+        </div>
+      </label>
+
+      </div>
+    </div>
+    <p class="msf-step-error" id="error-stap1">Maak een keuze om verder te gaan.</p>
+
+    <div class="msf-nav">
+      <button class="msf-btn msf-btn-primary" onclick="step1Next()">Volgende →</button>
+    </div>
+  </div>
+
+  <!-- ══════════════ STAP 2 ══════════════ -->
+  <div class="msf-step-panel" id="step2">
+    <p class="msf-step-title">Gegevens</p>
+    <p class="msf-step-sub">Vul de gegevens in van de persoon die zich inschrijft.</p>
+
+    <!-- Gegevens ingeschrevene -->
+    <div class="msf-section-label">Gegevens ingeschrevene</div>
+
+    <div class="msf-row col-2">
+      <div class="msf-field">
+        <label for="voornaam">Voornaam <span style="color:#d32f2f">*</span></label>
+        <input type="text" id="voornaam" name="voornaam" placeholder="Voornaam">
+        <span class="msf-field-error" id="err-voornaam">Vul een voornaam in.</span>
+      </div>
+      <div class="msf-field">
+        <label for="achternaam">Achternaam <span style="color:#d32f2f">*</span></label>
+        <input type="text" id="achternaam" name="achternaam" placeholder="Achternaam">
+        <span class="msf-field-error" id="err-achternaam">Vul een achternaam in.</span>
+      </div>
+    </div>
+
+    <div class="msf-row col-2">
+      <div class="msf-field">
+        <label for="geboortedatum">Geboortedatum <span style="color:#d32f2f">*</span></label>
+        <input type="text" id="geboortedatum" name="geboortedatum" placeholder="dd-mm-jjjj" inputmode="numeric" maxlength="10" oninput="maskDateInput(this)">
+        <span class="msf-field-error" id="err-geboortedatum">Vul een geboortedatum in.</span>
+      </div>
+      <div class="msf-field" id="field-telefoon-ingeschrevene">
+        <label for="telefoon">Telefoonnummer (WhatsApp) <span style="color:#d32f2f">*</span></label>
+        <input type="tel" id="telefoon" name="telefoon" placeholder="06 12345678">
+        <span class="msf-field-error" id="err-telefoon">Vul een telefoonnummer in.</span>
+      </div>
+    </div>
+
+    <div class="msf-row col-1">
+      <div class="msf-field">
+        <label for="email">E-mailadres <span style="color:#d32f2f">*</span></label>
+        <input type="email" id="email" name="email" placeholder="naam@voorbeeld.nl">
+        <span class="msf-field-error" id="err-email">Vul een geldig e-mailadres in.</span>
+      </div>
+    </div>
+
+    <!-- Contact person toggle -->
+    <div class="msf-toggle-row" id="cpToggleRow" onclick="toggleContactpersoon()">
+      <input type="checkbox" id="cp_anders" name="cp_anders" onclick="event.stopPropagation(); toggleContactpersoon()">
+      <label for="cp_anders" onclick="event.preventDefault()">
+        <strong>De contactpersoon is iemand anders</strong>
+        Vink aan als de ingeschrevene een kind of derde is en jij als ouder, verzorger of begeleider het aanspreekpunt bent. Je kunt dan jouw eigen naam en nummer invullen als contactpersoon.
+      </label>
+    </div>
+
+    <!-- Contact person fields (hidden by default) -->
+    <div class="msf-contactpersoon-section" id="cpSection">
+      <div class="msf-section-label">Gegevens contactpersoon</div>
+      <div class="msf-row col-2">
+        <div class="msf-field">
+          <label for="cp_voornaam">Voornaam contactpersoon <span style="color:#d32f2f">*</span></label>
+          <input type="text" id="cp_voornaam" name="cp_voornaam" placeholder="Voornaam">
+          <span class="msf-field-error" id="err-cp_voornaam">Vul een voornaam in.</span>
+        </div>
+        <div class="msf-field">
+          <label for="cp_achternaam">Achternaam contactpersoon <span style="color:#d32f2f">*</span></label>
+          <input type="text" id="cp_achternaam" name="cp_achternaam" placeholder="Achternaam">
+          <span class="msf-field-error" id="err-cp_achternaam">Vul een achternaam in.</span>
+        </div>
+      </div>
+      <div class="msf-row col-1">
+        <div class="msf-field">
+          <label for="cp_telefoon">Telefoonnummer contactpersoon (WhatsApp) <span style="color:#d32f2f">*</span></label>
+          <input type="tel" id="cp_telefoon" name="cp_telefoon" placeholder="06 12345678">
+          <span class="msf-field-error" id="err-cp_telefoon">Vul een telefoonnummer in.</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- Address -->
+    <div class="msf-section-label">Adresgegevens</div>
+
+    <div class="msf-row col-1">
+      <div class="msf-field">
+        <label for="adres">Adres <span style="color:#d32f2f">*</span></label>
+        <input type="text" id="adres" name="adres" placeholder="Straat en huisnummer">
+        <span class="msf-field-error" id="err-adres">Vul een adres in.</span>
+      </div>
+    </div>
+
+    <div class="msf-row col-2">
+      <div class="msf-field">
+        <label for="postcode">Postcode <span style="color:#d32f2f">*</span></label>
+        <input type="text" id="postcode" name="postcode" placeholder="1234 AB">
+        <span class="msf-field-error" id="err-postcode">Vul een postcode in.</span>
+      </div>
+      <div class="msf-field">
+        <label for="woonplaats">Woonplaats <span style="color:#d32f2f">*</span></label>
+        <input type="text" id="woonplaats" name="woonplaats" placeholder="Woonplaats">
+        <span class="msf-field-error" id="err-woonplaats">Vul een woonplaats in.</span>
+      </div>
+    </div>
+
+    <div class="msf-nav">
+      <button class="msf-btn msf-btn-secondary" onclick="goToStep(1)">← Terug</button>
+      <button class="msf-btn msf-btn-primary" onclick="goToStep(3)">Volgende →</button>
+    </div>
+  </div>
+
+  <!-- ══════════════ STAP 3 ══════════════ -->
+  <div class="msf-step-panel" id="step3">
+    <p class="msf-step-title">Indicatie niveau</p>
+    <p class="msf-step-sub">Geef een indicatie van het huidige niveau.</p>
+
+    <div class="msf-info-box">
+      <strong>Let op:</strong> Dit is alleen een indicatie. Na inschrijving zal de vereniging ook een eigen toetsing van het niveau uitvoeren om in de juiste groep in te delen.
+    </div>
+
+    <div class="msf-radio-group">
+
+      <label class="msf-radio-card">
+        <input type="radio" name="niveau" value="instroom">
+        <div class="msf-radio-card-text">
+          <strong>Instroomniveau</strong>
+          <span>Letters herkennen, uitspraak en eerste schrijfoefeningen</span>
+        </div>
+      </label>
+
+      <label class="msf-radio-card">
+        <input type="radio" name="niveau" value="basis">
+        <div class="msf-radio-card-text">
+          <strong>Basisniveau</strong>
+          <span>Woorden lezen en schrijven, woordenschat opbouwen</span>
+        </div>
+      </label>
+
+      <label class="msf-radio-card">
+        <input type="radio" name="niveau" value="gevorderd">
+        <div class="msf-radio-card-text">
+          <strong>Gevorderd niveau</strong>
+          <span>Teksten lezen, gesprekken, schrijven en basisgrammatica</span>
+        </div>
+      </label>
+
+    </div>
+    <p class="msf-step-error" id="error-stap3">Kies een niveau om verder te gaan.</p>
+
+    <div class="msf-nav">
+      <button class="msf-btn msf-btn-secondary" onclick="goToStep(2)">← Terug</button>
+      <button class="msf-btn msf-btn-primary" onclick="step3Next()">Volgende →</button>
+    </div>
+  </div>
+
+  <!-- ══════════════ STAP 4 ══════════════ -->
+  <div class="msf-step-panel" id="step4">
+    <p class="msf-step-title">Lesdagen</p>
+    <p class="msf-step-sub">Kies je voorkeur voor de lesdagen.</p>
+
+    <div class="msf-info-box">
+      De lessen vinden plaats op <strong>twee vaste lesdagen per week</strong>. Je volgt beide dagen van het gekozen rooster. Dit is een <strong>voorkeur</strong> — de vereniging deelt je definitief in op basis van beschikbaarheid.
+    </div>
+
+    <div class="msf-radio-group">
+
+      <label class="msf-radio-card">
+        <input type="radio" name="rooster" value="za_zo_blok1">
+        <div class="msf-radio-card-text">
+          <strong>Zaterdag &amp; zondag</strong>
+          <span>Blok 1 — 09:00 – 11:00</span>
+        </div>
+      </label>
+
+      <label class="msf-radio-card">
+        <input type="radio" name="rooster" value="za_zo_blok2">
+        <div class="msf-radio-card-text">
+          <strong>Zaterdag &amp; zondag</strong>
+          <span>Blok 2 — 11:15 – 13:15</span>
+        </div>
+      </label>
+
+      <label class="msf-radio-card">
+        <input type="radio" name="rooster" value="za_zo_blok3">
+        <div class="msf-radio-card-text">
+          <strong>Zaterdag &amp; zondag</strong>
+          <span>Blok 3 — 13:30 – 15:30</span>
+        </div>
+      </label>
+
+      <label class="msf-radio-card">
+        <input type="radio" name="rooster" value="ma_wo">
+        <div class="msf-radio-card-text">
+          <strong>Maandag &amp; woensdag</strong>
+          <span>15:30 – 17:30</span>
+        </div>
+      </label>
+
+      <label class="msf-radio-card">
+        <input type="radio" name="rooster" value="di_do">
+        <div class="msf-radio-card-text">
+          <strong>Dinsdag &amp; donderdag</strong>
+          <span>15:30 – 17:30</span>
+        </div>
+      </label>
+
+    </div>
+    <p class="msf-step-error" id="error-stap4">Kies een voorkeur voor de lesdagen om verder te gaan.</p>
+
+    <div class="msf-nav">
+      <button class="msf-btn msf-btn-secondary" onclick="goToStep(3)">← Terug</button>
+      <button class="msf-btn msf-btn-primary" onclick="goToStep(5)">Volgende →</button>
+    </div>
+  </div>
+
+  <!-- ══════════════ STAP 5 ══════════════ -->
+  <div class="msf-step-panel" id="step5">
+    <p class="msf-step-title">Akkoord & bevestiging</p>
+    <p class="msf-step-sub">Vul je bankgegevens in en geef akkoord op de voorwaarden.</p>
+
+    <div class="msf-info-box">
+      <p id="prijs-regel-maandelijks" style="margin:0">
+        De kosten voor de lessen zijn <strong>€ <span id="les-prijs-maand"></span> per maand</strong>, via automatische incasso (niet tijdens de zomervakantie).
+      </p>
+      <p id="prijs-regel-jaarlijks" style="margin:0;display:none">
+        De kosten voor de lessen zijn <strong>€ <span id="les-prijs-jaar"></span> per schooljaar</strong>, in één keer geïncasseerd aan het begin van het schooljaar.
+      </p>
+    </div>
+
+    <div class="msf-toggle-row" id="volgendKindRow" onclick="toggleVolgendKind()">
+      <input type="checkbox" id="volgend_kind" onclick="event.stopPropagation(); toggleVolgendKind()">
+      <label for="volgend_kind" onclick="event.preventDefault()">
+        <strong>Dit is niet het eerste kind dat ik dit schooljaar inschrijf</strong>
+        Vink aan als je al een ander kind uit hetzelfde gezin bij Vereniging Arrahma hebt ingeschreven. Voor ieder volgend kind geldt een gezinskorting.
+      </label>
+    </div>
+
+    <div class="msf-section-label">Betaalwijze</div>
+    <div class="msf-radio-group">
+      <label class="msf-radio-card">
+        <input type="radio" name="betaalwijze" value="maandelijks" onchange="updateSinglePrice()">
+        <div class="msf-radio-card-text">
+          <strong>Maandelijks</strong>
+          <span>Automatische incasso per maand</span>
+        </div>
+      </label>
+      <label class="msf-radio-card">
+        <input type="radio" name="betaalwijze" value="jaarlijks" onchange="updateSinglePrice()">
+        <div class="msf-radio-card-text">
+          <strong>Jaarlijks</strong>
+          <span>Eén automatische incasso aan het begin van het schooljaar</span>
+        </div>
+      </label>
+    </div>
+    <p class="msf-step-error" id="error-betaalwijze-single">Kies een betaalwijze om verder te gaan.</p>
+
+    <div class="msf-section-label">Bankgegevens</div>
+
+    <div class="msf-row col-2">
+      <div class="msf-field">
+        <label for="rekeningnummer">IBAN / Rekeningnummer <span style="color:#d32f2f">*</span></label>
+        <input type="text" id="rekeningnummer" name="rekeningnummer" placeholder="NL00 BANK 0000 0000 00">
+        <span class="msf-field-error" id="err-rekeningnummer">Vul een rekeningnummer in.</span>
+      </div>
+      <div class="msf-field">
+        <label for="naam_rekeninghouder">Naam rekeninghouder <span style="color:#d32f2f">*</span></label>
+        <input type="text" id="naam_rekeninghouder" name="naam_rekeninghouder" placeholder="Volledige naam">
+        <span class="msf-field-error" id="err-naam_rekeninghouder">Vul de naam van de rekeninghouder in.</span>
+      </div>
+    </div>
+
+    <div class="msf-section-label">Toestemming</div>
+
+    <div class="msf-check-row">
+      <input type="checkbox" id="akkoord_betaling" name="akkoord_betaling">
+      <label for="akkoord_betaling">
+        Ik geef toestemming aan Vereniging Arrahma om het aangegeven bedrag via <strong>automatische incasso</strong> af te schrijven, conform de gekozen betaalwijze.
+      </label>
+    </div>
+
+    <div class="msf-check-row">
+      <input type="checkbox" id="akkoord_gegevens" name="akkoord_gegevens">
+      <label for="akkoord_gegevens">
+        Ik geef toestemming aan Vereniging Arrahma om mijn <strong>persoonsgegevens op te slaan en te verwerken</strong> voor administratieve doeleinden.
+      </label>
+    </div>
+
+    <div class="msf-check-row">
+      <input type="checkbox" id="akkoord_voorwaarden" name="akkoord_voorwaarden">
+      <label for="akkoord_voorwaarden">
+        Ik ga akkoord met de inhoud van het <a href="#" id="reglementLinkSingle" target="_blank" rel="noopener" style="color:#2d3a4a;font-weight:700;text-decoration:underline;">onderwijsreglement</a> van Vereniging Arrahma.
+      </label>
+    </div>
+
+    <p class="msf-step-error" id="error-stap5">Vul alle verplichte velden in en geef akkoord op alle punten.</p>
+
+    <div class="msf-nav">
+      <button class="msf-btn msf-btn-secondary" onclick="step5Back()">← Terug</button>
+      <button class="msf-btn msf-btn-primary" id="submitBtn" onclick="submitForm()">Verstuur inschrijving</button>
+    </div>
+  </div>
+
+  <!-- ══════════════ BULK STAP 2 — KINDEREN ══════════════ -->
+  <div class="msf-step-panel" id="bstep2">
+    <p class="msf-step-title">Kinderen</p>
+    <p class="msf-step-sub">Voeg elk kind toe dat je wilt inschrijven.</p>
+
+    <details class="msf-details" open>
+      <summary>Uitleg over niveaus en lesdagen</summary>
+      <div class="msf-details-body">
+        <p style="margin:.2rem 0 0;">
+          De lessen vinden plaats op <strong>twee vaste lesdagen per week</strong>; elk kind volgt beide dagen van het gekozen rooster. Het niveau is een <strong>indicatie</strong> — de vereniging toetst zelf en deelt definitief in op basis van beschikbaarheid.
+        </p>
+
+        <h4>Niveaus</h4>
+        <table class="msf-ref-table">
+          <tr><td>Instroomniveau</td><td>Letters herkennen, uitspraak en eerste schrijfoefeningen</td></tr>
+          <tr><td>Basisniveau</td><td>Woorden lezen en schrijven, woordenschat opbouwen</td></tr>
+          <tr><td>Gevorderd niveau</td><td>Teksten lezen, gesprekken, schrijven en basisgrammatica</td></tr>
+        </table>
+
+        <h4>Lesdagen &amp; tijden</h4>
+        <table class="msf-ref-table">
+          <tr><td>Zaterdag &amp; zondag</td><td>Blok 1: 09:00–11:00 &nbsp;·&nbsp; Blok 2: 11:15–13:15 &nbsp;·&nbsp; Blok 3: 13:30–15:30</td></tr>
+          <tr><td>Maandag &amp; woensdag</td><td>15:30–17:30</td></tr>
+          <tr><td>Dinsdag &amp; donderdag</td><td>15:30–17:30</td></tr>
+        </table>
+      </div>
+    </details>
+
+    <div id="childrenList"></div>
+
+    <button type="button" class="msf-add-child" onclick="addChild()">+ Nog een kind toevoegen</button>
+    <p class="msf-step-error" id="error-bulk-kinderen">Vul voor elk kind alle velden correct in (leeftijd 6 t/m 11 jaar).</p>
+
+    <div class="msf-nav">
+      <button class="msf-btn msf-btn-secondary" onclick="goBulk(1)">← Terug</button>
+      <button class="msf-btn msf-btn-primary" onclick="goBulk(3)">Volgende →</button>
+    </div>
+  </div>
+
+  <!-- ══════════════ BULK STAP 3 — CONTACT & ADRES ══════════════ -->
+  <div class="msf-step-panel" id="bstep3">
+    <p class="msf-step-title">Contactpersoon &amp; adres</p>
+    <p class="msf-step-sub">Gegevens van de ouder/verzorger. Deze gelden voor alle kinderen.</p>
+
+    <div class="msf-section-label">Contactpersoon (ouder/verzorger)</div>
+    <div class="msf-row col-2">
+      <div class="msf-field">
+        <label for="b_cp_voornaam">Voornaam <span style="color:#d32f2f">*</span></label>
+        <input type="text" id="b_cp_voornaam" placeholder="Voornaam">
+        <span class="msf-field-error" id="err-b_cp_voornaam">Vul een voornaam in.</span>
+      </div>
+      <div class="msf-field">
+        <label for="b_cp_achternaam">Achternaam <span style="color:#d32f2f">*</span></label>
+        <input type="text" id="b_cp_achternaam" placeholder="Achternaam">
+        <span class="msf-field-error" id="err-b_cp_achternaam">Vul een achternaam in.</span>
+      </div>
+    </div>
+    <div class="msf-row col-2">
+      <div class="msf-field">
+        <label for="b_cp_telefoon">Telefoonnummer (WhatsApp) <span style="color:#d32f2f">*</span></label>
+        <input type="tel" id="b_cp_telefoon" placeholder="06 12345678">
+        <span class="msf-field-error" id="err-b_cp_telefoon">Vul een telefoonnummer in.</span>
+      </div>
+      <div class="msf-field">
+        <label for="b_cp_email">E-mailadres <span style="color:#d32f2f">*</span></label>
+        <input type="email" id="b_cp_email" placeholder="naam@voorbeeld.nl">
+        <span class="msf-field-error" id="err-b_cp_email">Vul een geldig e-mailadres in.</span>
+      </div>
+    </div>
+
+    <div class="msf-section-label">Adresgegevens</div>
+    <div class="msf-row col-1">
+      <div class="msf-field">
+        <label for="b_adres">Adres <span style="color:#d32f2f">*</span></label>
+        <input type="text" id="b_adres" placeholder="Straat en huisnummer">
+        <span class="msf-field-error" id="err-b_adres">Vul een adres in.</span>
+      </div>
+    </div>
+    <div class="msf-row col-2">
+      <div class="msf-field">
+        <label for="b_postcode">Postcode <span style="color:#d32f2f">*</span></label>
+        <input type="text" id="b_postcode" placeholder="1234 AB">
+        <span class="msf-field-error" id="err-b_postcode">Vul een postcode in.</span>
+      </div>
+      <div class="msf-field">
+        <label for="b_woonplaats">Woonplaats <span style="color:#d32f2f">*</span></label>
+        <input type="text" id="b_woonplaats" placeholder="Woonplaats">
+        <span class="msf-field-error" id="err-b_woonplaats">Vul een woonplaats in.</span>
+      </div>
+    </div>
+
+    <div class="msf-nav">
+      <button class="msf-btn msf-btn-secondary" onclick="goBulk(2)">← Terug</button>
+      <button class="msf-btn msf-btn-primary" onclick="goBulk(4)">Volgende →</button>
+    </div>
+  </div>
+
+  <!-- ══════════════ BULK STAP 4 — AKKOORD ══════════════ -->
+  <div class="msf-step-panel" id="bstep4">
+    <p class="msf-step-title">Akkoord & bevestiging</p>
+    <p class="msf-step-sub">Vul je bankgegevens in en geef akkoord op de voorwaarden.</p>
+
+    <div class="msf-info-box">
+      <p style="margin:0 0 6px">
+        Eerste kind: <strong>€ <span id="bulk-prijs-eerste"></span></strong>. Ieder volgend kind: <strong>€ <span id="bulk-prijs-volgend"></span></strong>.
+      </p>
+      <p id="bulk-prijs-regel-maandelijks" style="margin:0">
+        Voor <strong><span id="bulk-aantal"></span></strong> is dit samen <strong>€ <span id="bulk-prijs-totaal-maand"></span> per maand</strong>, via automatische incasso (niet tijdens de zomervakantie).
+      </p>
+      <p id="bulk-prijs-regel-jaarlijks" style="margin:0;display:none">
+        Voor <strong><span id="bulk-aantal-jaar"></span></strong> is dit samen <strong>€ <span id="bulk-prijs-totaal-jaar"></span> per schooljaar</strong>, in één keer geïncasseerd aan het begin van het schooljaar.
+      </p>
+    </div>
+
+    <div class="msf-section-label">Betaalwijze</div>
+    <div class="msf-radio-group">
+      <label class="msf-radio-card">
+        <input type="radio" name="b_betaalwijze" value="maandelijks" onchange="updateBulkPrice()">
+        <div class="msf-radio-card-text">
+          <strong>Maandelijks</strong>
+          <span>Automatische incasso per maand</span>
+        </div>
+      </label>
+      <label class="msf-radio-card">
+        <input type="radio" name="b_betaalwijze" value="jaarlijks" onchange="updateBulkPrice()">
+        <div class="msf-radio-card-text">
+          <strong>Jaarlijks</strong>
+          <span>Eén automatische incasso aan het begin van het schooljaar</span>
+        </div>
+      </label>
+    </div>
+    <p class="msf-step-error" id="error-betaalwijze-bulk">Kies een betaalwijze om verder te gaan.</p>
+
+    <div class="msf-section-label">Bankgegevens</div>
+    <div class="msf-row col-2">
+      <div class="msf-field">
+        <label for="b_rekeningnummer">IBAN / Rekeningnummer <span style="color:#d32f2f">*</span></label>
+        <input type="text" id="b_rekeningnummer" placeholder="NL00 BANK 0000 0000 00">
+        <span class="msf-field-error" id="err-b_rekeningnummer">Vul een rekeningnummer in.</span>
+      </div>
+      <div class="msf-field">
+        <label for="b_naam_rekeninghouder">Naam rekeninghouder <span style="color:#d32f2f">*</span></label>
+        <input type="text" id="b_naam_rekeninghouder" placeholder="Volledige naam">
+        <span class="msf-field-error" id="err-b_naam_rekeninghouder">Vul de naam van de rekeninghouder in.</span>
+      </div>
+    </div>
+
+    <div class="msf-section-label">Toestemming</div>
+    <div class="msf-check-row">
+      <input type="checkbox" id="b_akkoord_betaling">
+      <label for="b_akkoord_betaling">
+        Ik geef toestemming aan Vereniging Arrahma om het aangegeven bedrag via <strong>automatische incasso</strong> af te schrijven, conform de gekozen betaalwijze.
+      </label>
+    </div>
+    <div class="msf-check-row">
+      <input type="checkbox" id="b_akkoord_gegevens">
+      <label for="b_akkoord_gegevens">
+        Ik geef toestemming aan Vereniging Arrahma om de <strong>persoonsgegevens op te slaan en te verwerken</strong> voor administratieve doeleinden.
+      </label>
+    </div>
+    <div class="msf-check-row">
+      <input type="checkbox" id="b_akkoord_voorwaarden">
+      <label for="b_akkoord_voorwaarden">
+        Ik ga akkoord met de inhoud van het <a href="#" id="reglementLinkBulk" target="_blank" rel="noopener" style="color:#2d3a4a;font-weight:700;text-decoration:underline;">onderwijsreglement</a> van Vereniging Arrahma.
+      </label>
+    </div>
+
+    <p class="msf-step-error" id="error-bulk-akkoord">Vul alle verplichte velden in en geef akkoord op alle punten.</p>
+
+    <div class="msf-nav">
+      <button class="msf-btn msf-btn-secondary" onclick="goBulk(3)">← Terug</button>
+      <button class="msf-btn msf-btn-primary" id="submitBtnBulk" onclick="submitBulk()">Verstuur inschrijving</button>
+    </div>
+  </div>
+
+  <!-- ══════════════ SUCCESS ══════════════ -->
+  <div class="msf-success" id="msfSuccess">
+    <div class="msf-success-icon">✅</div>
+    <h2>Bedankt voor je inschrijving!</h2>
+    <p>We hebben je aanmelding ontvangen en nemen zo snel mogelijk contact met je op.</p>
+
+    <div class="msf-success-again">
+      <label class="msf-keepbank">
+        <input type="checkbox" id="keepBank" checked>
+        Bankgegevens onthouden voor de volgende inschrijving
+      </label>
+      <button type="button" class="msf-btn msf-btn-primary" onclick="startNewInschrijving()">Nog iemand inschrijven</button>
+    </div>
+  </div>
+
+</div>
+
+<script>
+  const FORM_ENDPOINT           = 'https://www.vereniging-arrahma.nl/wp-json/arrahma/v1/inschrijving';
+  const ROOSTER_COUNTS_ENDPOINT = 'https://www.vereniging-arrahma.nl/wp-json/arrahma/v1/rooster-counts';
+  const ROOSTER_CAP             = 30;
+
+  let currentStep      = 1;
+  let selectedCategory = null;
+  let cpAnders         = false; // contactpersoon is anders dan ingeschrevene
+  let lastBank         = null;  // onthouden bankgegevens voor een volgende inschrijving
+
+  // ── Capaciteit lesdagen (rooster) — één keer opgehaald en gecached per sessie ──
+  let roosterCounts        = null;
+  let roosterCountsPromise = null;
+
+  // ── Prijzen (Onderwijsreglement v1.0) ──
+  const PRIJS_EERSTE_KIND  = 30;    // € per maand, eerste kind
+  const PRIJS_VOLGEND_KIND = 27.5;  // € per maand, ieder volgend kind uit hetzelfde gezin
+  const REGLEMENT_URL      = 'https://www.vereniging-arrahma.nl/wp-content/uploads/2026/07/Onderwijsreglement-Vereniging-Arrahma-versie-1.0.pdf';
+  ['reglementLinkSingle', 'reglementLinkBulk'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.href = REGLEMENT_URL;
+  });
+
+  // ── Bulk (meerdere kinderen) state ──
+  const BULK_PANELS    = ['step1', 'bstep2', 'bstep3', 'bstep4'];
+  let   formMode       = 'single';           // 'single' | 'bulk'
+  let   bulkStep       = 1;                   // 1..4, index into BULK_PANELS
+  let   childSeq       = 0;                   // ever-increasing child counter
+
+  // ── Prijs voor stap 5 (single mode): afhankelijk van 'volgend kind' toggle ──
+  function getLessonPrice() {
+    const volgendKind = document.getElementById('volgend_kind')?.checked;
+    return volgendKind ? PRIJS_VOLGEND_KIND : PRIJS_EERSTE_KIND;
+  }
+
+  function formatPrijs(bedrag) {
+    return bedrag.toFixed(2).replace('.', ',').replace(',00', ',-');
+  }
+
+  // ── Prijs- en betaalwijze-weergave (single mode, stap 5) ──
+  function updateSinglePrice() {
+    // De gezinskorting ('volgend kind') geldt alleen voor de categorie 'Kinderen'
+    const volgendKindRow = document.getElementById('volgendKindRow');
+    const volgendKindCb  = document.getElementById('volgend_kind');
+    if (selectedCategory === 'kinderen') {
+      volgendKindRow.style.display = '';
+    } else {
+      volgendKindRow.style.display = 'none';
+      if (volgendKindCb.checked) {
+        volgendKindCb.checked = false;
+        volgendKindRow.classList.remove('active');
+      }
+    }
+
+    const maand   = getLessonPrice();
+    const jaar    = maand === PRIJS_VOLGEND_KIND ? 275 : 300;
+    const cadence = document.querySelector('input[name="betaalwijze"]:checked')?.value;
+
+    const maandEl  = document.getElementById('les-prijs-maand');
+    const jaarEl   = document.getElementById('les-prijs-jaar');
+    const maandRow = document.getElementById('prijs-regel-maandelijks');
+    const jaarRow  = document.getElementById('prijs-regel-jaarlijks');
+
+    if (maandEl) maandEl.textContent = formatPrijs(maand);
+    if (jaarEl)  jaarEl.textContent  = formatPrijs(jaar);
+    if (maandRow) maandRow.style.display = cadence === 'jaarlijks' ? 'none' : 'block';
+    if (jaarRow)  jaarRow.style.display  = cadence === 'jaarlijks' ? 'block' : 'none';
+  }
+
+  // ── Stap 1: radio cards ──
+  document.querySelectorAll('input[name="inschrijving_voor"]').forEach(radio => {
+    radio.addEventListener('change', function () {
+      selectedCategory = this.value;
+      document.querySelectorAll('.msf-radio-card').forEach(c => {
+        if (c.querySelector('input[name="inschrijving_voor"]')) c.classList.remove('selected');
+      });
+      this.closest('.msf-radio-card').classList.add('selected');
+      document.getElementById('error-stap1').style.display = 'none';
+      if (selectedCategory === 'kinderen') fetchRoosterCounts();
+    });
+  });
+
+  // ── Stap 3: niveau radio cards ──
+  document.querySelectorAll('input[name="niveau"]').forEach(radio => {
+    radio.addEventListener('change', function () {
+      document.querySelectorAll('.msf-radio-card').forEach(c => {
+        if (c.querySelector('input[name="niveau"]')) c.classList.remove('selected');
+      });
+      this.closest('.msf-radio-card').classList.add('selected');
+      document.getElementById('error-stap3').style.display = 'none';
+    });
+  });
+
+  // ── Stap 4: rooster radio cards ──
+  document.querySelectorAll('input[name="rooster"]').forEach(radio => {
+    radio.addEventListener('change', function () {
+      document.querySelectorAll('.msf-radio-card').forEach(c => {
+        if (c.querySelector('input[name="rooster"]')) c.classList.remove('selected');
+      });
+      this.closest('.msf-radio-card').classList.add('selected');
+      document.getElementById('error-stap4').style.display = 'none';
+    });
+  });
+
+  // Click on whole card selects radio
+  document.querySelectorAll('.msf-radio-card').forEach(card => {
+    card.addEventListener('click', function () {
+      const radio = this.querySelector('input[type="radio"]');
+      if (radio && !radio.disabled && !radio.checked) {
+        radio.checked = true;
+        radio.dispatchEvent(new Event('change'));
+      }
+    });
+  });
+
+  // ── Contactpersoon toggle ──
+  function toggleContactpersoon() {
+    const cb      = document.getElementById('cp_anders');
+    const section = document.getElementById('cpSection');
+    const row     = document.getElementById('cpToggleRow');
+
+    // If click came from the row (not the checkbox), toggle it
+    if (document.activeElement !== cb) {
+      cb.checked = !cb.checked;
+    }
+
+    cpAnders = cb.checked;
+    section.classList.toggle('visible', cpAnders);
+    row.classList.toggle('active', cpAnders);
+
+    // Adjust telefoon label
+    const telLabel = document.querySelector('#field-telefoon-ingeschrevene label');
+    telLabel.innerHTML = cpAnders
+      ? 'Telefoonnummer ingeschrevene'
+      : 'Telefoonnummer (WhatsApp) <span style="color:#d32f2f">*</span>';
+  }
+
+  function toggleVolgendKind() {
+    const cb  = document.getElementById('volgend_kind');
+    const row = document.getElementById('volgendKindRow');
+
+    if (document.activeElement !== cb) {
+      cb.checked = !cb.checked;
+    }
+
+    row.classList.toggle('active', cb.checked);
+    updateSinglePrice();
+  }
+
+  // ── Validatie helpers ──
+
+  /** Auto-formats a geboortedatum text input as dd-mm-jjjj while typing. */
+  function maskDateInput(el) {
+    const digits = el.value.replace(/\D/g, '').slice(0, 8);
+    let out = digits.slice(0, 2);
+    if (digits.length > 2) out += '-' + digits.slice(2, 4);
+    if (digits.length > 4) out += '-' + digits.slice(4, 8);
+    el.value = out;
+  }
+
+  /** Checks dd-mm-jjjj is a real, plausible birthdate (not in the future, not absurdly old). */
+  function isValidDutchDate(str) {
+    const m = /^(\d{2})-(\d{2})-(\d{4})$/.exec(str.trim());
+    if (!m) return false;
+    const [, dd, mm, yyyy] = m.map(Number);
+    const d = new Date(yyyy, mm - 1, dd);
+    if (d.getFullYear() !== yyyy || d.getMonth() !== mm - 1 || d.getDate() !== dd) return false;
+    const now = new Date();
+    return yyyy >= 1900 && d <= now;
+  }
+
+  /** Converts a validated dd-mm-jjjj string to yyyy-mm-dd for the backend. */
+  function dutchDateToISO(str) {
+    const [, dd, mm, yyyy] = /^(\d{2})-(\d{2})-(\d{4})$/.exec(str.trim());
+    return `${yyyy}-${mm}-${dd}`;
+  }
+
+  /** Whole-years age from an already-validated dd-mm-jjjj string, measured against today. */
+  function ageFromDutchDate(str) {
+    const [, dd, mm, yyyy] = /^(\d{2})-(\d{2})-(\d{4})$/.exec(str.trim());
+    const birth = new Date(yyyy, mm - 1, dd);
+    const now = new Date();
+    let age = now.getFullYear() - birth.getFullYear();
+    const hadBirthdayThisYear = (now.getMonth() > birth.getMonth()) ||
+      (now.getMonth() === birth.getMonth() && now.getDate() >= birth.getDate());
+    if (!hadBirthdayThisYear) age--;
+    return age;
+  }
+
+  /** Fetches rooster seat counts once per form session and caches the result. */
+  function fetchRoosterCounts() {
+    if (roosterCountsPromise) return roosterCountsPromise;
+    roosterCountsPromise = fetch(ROOSTER_COUNTS_ENDPOINT)
+      .then(res => res.ok ? res.json() : null)
+      .then(data => { roosterCounts = data; applyRoosterCounts(); return data; })
+      .catch(() => null);
+    return roosterCountsPromise;
+  }
+
+  /** Disables full rooster options (single-mode cards + bulk per-child selects) using the cached counts. */
+  function applyRoosterCounts() {
+    if (!roosterCounts) return;
+
+    document.querySelectorAll('input[name="rooster"]').forEach(radio => {
+      const full = (roosterCounts[radio.value] ?? 0) >= ROOSTER_CAP;
+      radio.disabled = full;
+      if (full && radio.checked) { radio.checked = false; radio.closest('.msf-radio-card').classList.remove('selected'); }
+
+      const strongEl = radio.closest('.msf-radio-card').querySelector('.msf-radio-card-text strong');
+      let badge = strongEl.querySelector('.vol-badge');
+      if (full && !badge) {
+        badge = document.createElement('span');
+        badge.className = 'vol-badge';
+        badge.textContent = 'Vol';
+        strongEl.appendChild(badge);
+      } else if (!full && badge) {
+        badge.remove();
+      }
+    });
+
+    document.querySelectorAll('select[data-field="rooster"]').forEach(sel => {
+      Array.from(sel.options).forEach(opt => {
+        if (!opt.value) return; // placeholder "Kies lesdagen"
+        const full = (roosterCounts[opt.value] ?? 0) >= ROOSTER_CAP;
+        opt.disabled = full;
+        opt.textContent = opt.textContent.replace(/ \(Vol\)$/, '') + (full ? ' (Vol)' : '');
+        if ( full && sel.value === opt.value ) sel.value = '';
+      });
+    });
+  }
+
+  function validateDutchPhone(phone) {
+    // Accepts 06 12345678, 0612345678, +31 6 12345678, +31612345678, etc.
+    const normalized = phone.replace(/[\s\-\.]/g, '');
+    return /^(\+31|0)[0-9]{9}$/.test(normalized);
+  }
+
+  function validateDutchPostcode(postcode) {
+    // Accepts 1234AB or 1234 AB (case-insensitive)
+    return /^\d{4}\s?[A-Za-z]{2}$/.test(postcode.trim());
+  }
+
+  function validateIBAN(iban) {
+    // Strip spaces and uppercase
+    iban = iban.replace(/\s/g, '').toUpperCase();
+    // Basic structure check
+    if (!/^[A-Z]{2}\d{2}[A-Z0-9]{4,}$/.test(iban)) return false;
+    // Move first 4 chars to end, then replace letters with numbers (A=10…Z=35)
+    const rearranged = iban.slice(4) + iban.slice(0, 4);
+    const numStr = rearranged.split('').map(c => {
+      const code = c.charCodeAt(0);
+      return code >= 65 ? (code - 55).toString() : c;
+    }).join('');
+    // MOD-97 check
+    let remainder = 0;
+    for (const digit of numStr) remainder = (remainder * 10 + parseInt(digit)) % 97;
+    return remainder === 1;
+  }
+
+  // ── Navigatie ──
+  function goToStep(target) {
+    if (target > currentStep && !validateStep(currentStep)) return;
+
+    document.getElementById('step' + currentStep).classList.remove('active');
+
+    document.querySelectorAll('#msfProgress .msf-step-indicator').forEach(ind => {
+      const s = parseInt(ind.dataset.step);
+      ind.classList.remove('active', 'completed');
+      if (s === target) ind.classList.add('active');
+      if (s < target)  ind.classList.add('completed');
+    });
+
+    currentStep = target;
+    document.getElementById('step' + currentStep).classList.add('active');
+    if (target === 5) updateSinglePrice();
+    document.querySelector('.msf-wrapper').scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }
+
+  // ══════════════════════════════════════════════════════════
+  //  BULK MODE — meerdere kinderen
+  // ══════════════════════════════════════════════════════════
+
+  // ── Mode toggle ──
+  function setMode(mode) {
+    formMode = mode;
+    document.querySelectorAll('.msf-mode-btn').forEach(b =>
+      b.classList.toggle('active', b.dataset.mode === mode));
+    document.getElementById('categoryGroup').style.display = mode === 'single' ? 'block' : 'none';
+    document.getElementById('bulkNote').style.display      = mode === 'bulk'   ? 'block' : 'none';
+    document.getElementById('msfProgress').style.display     = mode === 'single' ? 'flex' : 'none';
+    document.getElementById('msfProgressBulk').style.display  = mode === 'bulk'   ? 'flex' : 'none';
+    document.getElementById('error-stap1').style.display = 'none';
+    if (mode === 'bulk') fetchRoosterCounts();
+    if (mode === 'bulk' && !document.querySelector('.msf-child-card')) addChild();
+  }
+
+  // ── Router from step 1 ──
+  function step1Next() {
+    if (formMode === 'bulk') { goBulk(2); return; }
+    goToStep(2);
+  }
+
+  // De Lesdagen-stap (4) is alleen relevant voor de categorie 'kinderen'
+  function step3Next() {
+    goToStep(selectedCategory === 'kinderen' ? 4 : 5);
+  }
+
+  function step5Back() {
+    goToStep(selectedCategory === 'kinderen' ? 4 : 3);
+  }
+
+  // ── Child card template ──
+  function childCardHTML(n) {
+    return `
+      <div class="msf-child-card">
+        <div class="msf-child-card-head">
+          <strong class="child-title">Kind ${n}</strong>
+          <button type="button" class="msf-child-remove" onclick="removeChildCard(this)">Verwijder</button>
+        </div>
+        <div class="msf-row col-2">
+          <div class="msf-field">
+            <label>Voornaam <span style="color:#d32f2f">*</span></label>
+            <input type="text" data-field="voornaam" placeholder="Voornaam">
+          </div>
+          <div class="msf-field">
+            <label>Achternaam <span style="color:#d32f2f">*</span></label>
+            <input type="text" data-field="achternaam" placeholder="Achternaam">
+          </div>
+        </div>
+        <div class="msf-row col-2">
+          <div class="msf-field">
+            <label>Geboortedatum <span style="color:#d32f2f">*</span></label>
+            <input type="text" data-field="geboortedatum" placeholder="dd-mm-jjjj" inputmode="numeric" maxlength="10" oninput="maskDateInput(this)">
+          </div>
+          <div class="msf-field">
+            <label>Niveau <span style="color:#d32f2f">*</span></label>
+            <select data-field="niveau">
+              <option value="">Kies niveau</option>
+              <option value="instroom">Instroomniveau</option>
+              <option value="basis">Basisniveau</option>
+              <option value="gevorderd">Gevorderd niveau</option>
+            </select>
+          </div>
+        </div>
+        <div class="msf-row col-1">
+          <div class="msf-field">
+            <label>Lesdagen (voorkeur) <span style="color:#d32f2f">*</span></label>
+            <select data-field="rooster">
+              <option value="">Kies lesdagen</option>
+              <option value="za_zo_blok1">Zaterdag &amp; zondag — 09:00–11:00</option>
+              <option value="za_zo_blok2">Zaterdag &amp; zondag — 11:15–13:15</option>
+              <option value="za_zo_blok3">Zaterdag &amp; zondag — 13:30–15:30</option>
+              <option value="ma_wo">Maandag &amp; woensdag — 15:30–17:30</option>
+              <option value="di_do">Dinsdag &amp; donderdag — 15:30–17:30</option>
+            </select>
+          </div>
+        </div>
+      </div>`;
+  }
+
+  function addChild() {
+    childSeq++;
+    const wrap = document.createElement('div');
+    wrap.innerHTML = childCardHTML(childSeq).trim();
+    document.getElementById('childrenList').appendChild(wrap.firstChild);
+    renumberChildren();
+    applyRoosterCounts();
+  }
+
+  function removeChildCard(btn) {
+    btn.closest('.msf-child-card').remove();
+    if (!document.querySelector('.msf-child-card')) addChild();
+    renumberChildren();
+  }
+
+  function renumberChildren() {
+    const cards = document.querySelectorAll('.msf-child-card');
+    cards.forEach((card, i) => {
+      card.querySelector('.child-title').textContent = 'Kind ' + (i + 1);
+      // Hide the remove button when only one child remains
+      card.querySelector('.msf-child-remove').style.visibility = cards.length > 1 ? 'visible' : 'hidden';
+    });
+  }
+
+  // ── Bulk navigatie ──
+  function goBulk(target) {
+    if (target > bulkStep && !validateBulk(bulkStep)) return;
+
+    document.getElementById(BULK_PANELS[bulkStep - 1]).classList.remove('active');
+
+    document.querySelectorAll('#msfProgressBulk .msf-step-indicator').forEach(ind => {
+      const s = parseInt(ind.dataset.step);
+      ind.classList.remove('active', 'completed');
+      if (s === target) ind.classList.add('active');
+      if (s < target)  ind.classList.add('completed');
+    });
+
+    bulkStep = target;
+    document.getElementById(BULK_PANELS[bulkStep - 1]).classList.add('active');
+    if (bulkStep === 4) updateBulkPrice();
+    document.querySelector('.msf-wrapper').scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }
+
+  // ── Bulk validatie ──
+  function validateBulk(step) {
+    if (step === 2) return validateChildren();
+    if (step === 3) return validateParentAdres();
+    return true;
+  }
+
+  function validateChildren() {
+    const cards = document.querySelectorAll('.msf-child-card');
+    let valid = cards.length > 0;
+
+    cards.forEach(card => {
+      ['voornaam', 'achternaam', 'geboortedatum', 'niveau', 'rooster'].forEach(f => {
+        const el = card.querySelector('[data-field="' + f + '"]');
+        const empty = !el.value.trim();
+        el.classList.toggle('error', empty);
+        if (empty) valid = false;
+      });
+
+      const gebEl = card.querySelector('[data-field="geboortedatum"]');
+      if (gebEl.value.trim() && !isValidDutchDate(gebEl.value)) {
+        gebEl.classList.add('error');
+        valid = false;
+      } else if (gebEl.value.trim()) {
+        const age = ageFromDutchDate(gebEl.value);
+        if (age < 6 || age > 11) {
+          gebEl.classList.add('error');
+          valid = false;
+        }
+      }
+    });
+
+    document.getElementById('error-bulk-kinderen').style.display = valid ? 'none' : 'block';
+    return valid;
+  }
+
+  function validateParentAdres() {
+    const required = ['b_cp_voornaam', 'b_cp_achternaam', 'b_cp_telefoon', 'b_cp_email',
+                      'b_adres', 'b_postcode', 'b_woonplaats'];
+    let valid = true;
+
+    required.forEach(id => {
+      const el    = document.getElementById(id);
+      const err   = document.getElementById('err-' + id);
+      const empty = !el.value.trim();
+      el.classList.toggle('error', empty);
+      if (err) err.classList.toggle('visible', empty);
+      if (empty) valid = false;
+    });
+
+    const emailEl = document.getElementById('b_cp_email');
+    if (emailEl.value && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(emailEl.value)) {
+      emailEl.classList.add('error');
+      document.getElementById('err-b_cp_email').classList.add('visible');
+      valid = false;
+    }
+
+    const telEl = document.getElementById('b_cp_telefoon');
+    if (telEl.value.trim() && !validateDutchPhone(telEl.value)) {
+      telEl.classList.add('error');
+      const err = document.getElementById('err-b_cp_telefoon');
+      err.textContent = 'Ongeldig telefoonnummer. Gebruik bijv. 06 12345678 of +31 6 12345678.';
+      err.classList.add('visible');
+      valid = false;
+    }
+
+    const pcEl = document.getElementById('b_postcode');
+    if (pcEl.value.trim() && !validateDutchPostcode(pcEl.value)) {
+      pcEl.classList.add('error');
+      const err = document.getElementById('err-b_postcode');
+      err.textContent = 'Ongeldige postcode. Gebruik bijv. 1234 AB.';
+      err.classList.add('visible');
+      valid = false;
+    }
+
+    return valid;
+  }
+
+  function updateBulkPrice() {
+    const count = document.querySelectorAll('.msf-child-card').length;
+    const cadence = document.querySelector('input[name="b_betaalwijze"]:checked')?.value;
+
+    // Maandtotaal: eerste kind volle prijs, elk volgend kind de gezinskorting-prijs
+    const maandTotaal = count > 0 ? PRIJS_EERSTE_KIND + Math.max(0, count - 1) * PRIJS_VOLGEND_KIND : 0;
+    const jaarTotaal  = count > 0 ? 300 + Math.max(0, count - 1) * 275 : 0;
+    const aantalTekst = count + (count === 1 ? ' kind' : ' kinderen');
+
+    document.getElementById('bulk-prijs-eerste').textContent      = formatPrijs(PRIJS_EERSTE_KIND);
+    document.getElementById('bulk-prijs-volgend').textContent     = formatPrijs(PRIJS_VOLGEND_KIND);
+    document.getElementById('bulk-aantal').textContent            = aantalTekst;
+    document.getElementById('bulk-aantal-jaar').textContent       = aantalTekst;
+    document.getElementById('bulk-prijs-totaal-maand').textContent = formatPrijs(maandTotaal);
+    document.getElementById('bulk-prijs-totaal-jaar').textContent  = formatPrijs(jaarTotaal);
+
+    document.getElementById('bulk-prijs-regel-maandelijks').style.display = cadence === 'jaarlijks' ? 'none' : 'block';
+    document.getElementById('bulk-prijs-regel-jaarlijks').style.display   = cadence === 'jaarlijks' ? 'block' : 'none';
+  }
+
+  // ── Bulk verzenden ──
+  async function submitBulk() {
+    if (!validateChildren()) { goBulk(2); return; }
+    if (!validateParentAdres()) { goBulk(3); return; }
+
+    const rek         = document.getElementById('b_rekeningnummer');
+    const naamRek     = document.getElementById('b_naam_rekeninghouder');
+    const betaling    = document.getElementById('b_akkoord_betaling');
+    const gegevens    = document.getElementById('b_akkoord_gegevens');
+    const voorwaarden = document.getElementById('b_akkoord_voorwaarden');
+
+    let valid = true;
+
+    [['b_rekeningnummer', rek], ['b_naam_rekeninghouder', naamRek]].forEach(([id, el]) => {
+      const empty = !el.value.trim();
+      el.classList.toggle('error', empty);
+      document.getElementById('err-' + id).classList.toggle('visible', empty);
+      if (empty) valid = false;
+    });
+
+    if (rek.value.trim() && !validateIBAN(rek.value)) {
+      rek.classList.add('error');
+      const err = document.getElementById('err-b_rekeningnummer');
+      err.textContent = 'Ongeldig IBAN. Gebruik bijv. NL91 ABNA 0417 1643 00.';
+      err.classList.add('visible');
+      valid = false;
+    }
+
+    const betaalwijze = document.querySelector('input[name="b_betaalwijze"]:checked')?.value;
+    document.getElementById('error-betaalwijze-bulk').style.display = betaalwijze ? 'none' : 'block';
+    if (!betaalwijze) valid = false;
+
+    if (!betaling.checked || !gegevens.checked || !voorwaarden.checked) valid = false;
+
+    if (!valid) { document.getElementById('error-bulk-akkoord').style.display = 'block'; return; }
+    document.getElementById('error-bulk-akkoord').style.display = 'none';
+
+    const children = Array.from(document.querySelectorAll('.msf-child-card')).map(card => ({
+      voornaam      : card.querySelector('[data-field="voornaam"]').value,
+      achternaam    : card.querySelector('[data-field="achternaam"]').value,
+      geboortedatum : dutchDateToISO(card.querySelector('[data-field="geboortedatum"]').value),
+      niveau        : card.querySelector('[data-field="niveau"]').value,
+      rooster       : card.querySelector('[data-field="rooster"]').value,
+    }));
+
+    const data = {
+      mode    : 'bulk',
+      contact : {
+        voornaam   : document.getElementById('b_cp_voornaam').value,
+        achternaam : document.getElementById('b_cp_achternaam').value,
+        telefoon   : document.getElementById('b_cp_telefoon').value,
+        email      : document.getElementById('b_cp_email').value,
+      },
+      adres : {
+        adres      : document.getElementById('b_adres').value,
+        postcode   : document.getElementById('b_postcode').value,
+        woonplaats : document.getElementById('b_woonplaats').value,
+      },
+      bank : {
+        rekeningnummer      : rek.value,
+        naam_rekeninghouder : naamRek.value,
+      },
+      betaalwijze : betaalwijze,
+      akkoord  : { betaling: true, gegevens: true, voorwaarden: true },
+      children : children,
+    };
+
+    const btn = document.getElementById('submitBtnBulk');
+    btn.textContent = 'Verzenden...';
+    btn.disabled = true;
+
+    try {
+      const res = await fetch(FORM_ENDPOINT, {
+        method : 'POST',
+        headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+        body   : JSON.stringify(data),
+      });
+
+      if (res.ok) {
+        lastBank = { rekeningnummer: rek.value, naam_rekeninghouder: naamRek.value };
+        document.getElementById('msfProgressBulk').style.display = 'none';
+        document.getElementById('bstep4').classList.remove('active');
+        document.getElementById('msfSuccess').classList.add('visible');
+      } else {
+        btn.textContent = 'Verstuur inschrijving';
+        btn.disabled = false;
+
+        const body = await res.json().catch(() => null);
+        if (body && body.code === 'rooster_full') {
+          const fullValue = body.data && body.data.rooster;
+          document.querySelectorAll('select[data-field="rooster"]').forEach(sel => {
+            if (sel.value === fullValue) sel.value = '';
+          });
+          roosterCounts = null;
+          roosterCountsPromise = null;
+          fetchRoosterCounts();
+          goBulk(2);
+          alert('Eén of meer gekozen lesdagen-tijdsloten zijn helaas net vol geraakt. Kies een ander tijdslot voor het aangegeven kind.');
+        } else {
+          alert('Er is iets misgegaan. Probeer het opnieuw of neem contact met ons op.');
+        }
+      }
+    } catch {
+      btn.textContent = 'Verstuur inschrijving';
+      btn.disabled = false;
+      alert('Verbindingsfout. Controleer je internetverbinding en probeer opnieuw.');
+    }
+  }
+
+  // ── Validatie ──
+  function validateStep(step) {
+    if (step === 1) {
+      if (!selectedCategory) {
+        document.getElementById('error-stap1').style.display = 'block';
+        return false;
+      }
+      return true;
+    }
+
+    if (step === 2) {
+      // Always required
+      const required = ['voornaam', 'achternaam', 'geboortedatum', 'email', 'adres', 'postcode', 'woonplaats'];
+
+      // Telefoon of ingeschrevene is required when cp_anders is OFF
+      if (!cpAnders) required.push('telefoon');
+
+      // Contact person fields required when cp_anders is ON
+      if (cpAnders) {
+        required.push('cp_voornaam', 'cp_achternaam', 'cp_telefoon');
+      }
+
+      let valid = true;
+
+      // ── Empty checks ──
+      required.forEach(id => {
+        const input = document.getElementById(id);
+        const error = document.getElementById('err-' + id);
+        const empty = !input || !input.value.trim();
+        if (input) input.classList.toggle('error', empty);
+        if (error) {
+          if (empty) error.textContent = error.dataset.emptyMsg || error.textContent;
+          error.classList.toggle('visible', empty);
+        }
+        if (empty) valid = false;
+      });
+
+      // ── E-mail format ──
+      const emailEl = document.getElementById('email');
+      if (emailEl.value && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(emailEl.value)) {
+        emailEl.classList.add('error');
+        document.getElementById('err-email').textContent = 'Vul een geldig e-mailadres in.';
+        document.getElementById('err-email').classList.add('visible');
+        valid = false;
+      }
+
+      // ── Telefoonnummer format ──
+      const telIds = cpAnders ? ['cp_telefoon'] : ['telefoon'];
+      if (!cpAnders) telIds.push(); // telefoon already in required list
+      // Also check cp_telefoon if cpAnders is on
+      const phoneFieldsToCheck = cpAnders ? ['cp_telefoon'] : ['telefoon'];
+      phoneFieldsToCheck.forEach(id => {
+        const el  = document.getElementById(id);
+        const err = document.getElementById('err-' + id);
+        if (el && el.value.trim() && !validateDutchPhone(el.value)) {
+          el.classList.add('error');
+          err.textContent = 'Ongeldig telefoonnummer. Gebruik bijv. 06 12345678 of +31 6 12345678.';
+          err.classList.add('visible');
+          valid = false;
+        }
+      });
+
+      // ── Postcode format ──
+      const postcodeEl  = document.getElementById('postcode');
+      const postcodeErr = document.getElementById('err-postcode');
+      if (postcodeEl && postcodeEl.value.trim() && !validateDutchPostcode(postcodeEl.value)) {
+        postcodeEl.classList.add('error');
+        postcodeErr.textContent = 'Ongeldige postcode. Gebruik bijv. 1234 AB.';
+        postcodeErr.classList.add('visible');
+        valid = false;
+      }
+
+      // ── Geboortedatum format ──
+      const gebEl  = document.getElementById('geboortedatum');
+      const gebErr = document.getElementById('err-geboortedatum');
+      if (gebEl && gebEl.value.trim() && !isValidDutchDate(gebEl.value)) {
+        gebEl.classList.add('error');
+        gebErr.textContent = 'Vul een geldige geboortedatum in (dd-mm-jjjj).';
+        gebErr.classList.add('visible');
+        valid = false;
+      } else if (gebEl && gebEl.value.trim() && selectedCategory === 'kinderen') {
+        const age = ageFromDutchDate(gebEl.value);
+        if (age < 6 || age > 11) {
+          gebEl.classList.add('error');
+          gebErr.textContent = 'Voor de categorie Kinderen geldt een leeftijd van 6 t/m 11 jaar.';
+          gebErr.classList.add('visible');
+          valid = false;
+        }
+      }
+
+      return valid;
+    }
+
+    if (step === 3) {
+      if (!document.querySelector('input[name="niveau"]:checked')) {
+        document.getElementById('error-stap3').style.display = 'block';
+        return false;
+      }
+      return true;
+    }
+
+    if (step === 4) {
+      if (!document.querySelector('input[name="rooster"]:checked')) {
+        document.getElementById('error-stap4').style.display = 'block';
+        return false;
+      }
+      return true;
+    }
+
+    return true;
+  }
+
+  // ── Verzenden ──
+  async function submitForm() {
+    const rek         = document.getElementById('rekeningnummer');
+    const naamRek     = document.getElementById('naam_rekeninghouder');
+    const betaling    = document.getElementById('akkoord_betaling');
+    const gegevens    = document.getElementById('akkoord_gegevens');
+    const voorwaarden = document.getElementById('akkoord_voorwaarden');
+
+    let valid = true;
+
+    [['rekeningnummer', rek], ['naam_rekeninghouder', naamRek]].forEach(([id, el]) => {
+      const empty = !el.value.trim();
+      el.classList.toggle('error', empty);
+      const errEl = document.getElementById('err-' + id);
+      if (empty) errEl.textContent = id === 'rekeningnummer' ? 'Vul een IBAN in.' : 'Vul de naam van de rekeninghouder in.';
+      errEl.classList.toggle('visible', empty);
+      if (empty) valid = false;
+    });
+
+    // ── IBAN format check ──
+    if (rek.value.trim() && !validateIBAN(rek.value)) {
+      rek.classList.add('error');
+      document.getElementById('err-rekeningnummer').textContent = 'Ongeldig IBAN. Gebruik bijv. NL91 ABNA 0417 1643 00.';
+      document.getElementById('err-rekeningnummer').classList.add('visible');
+      valid = false;
+    }
+
+    const betaalwijze = document.querySelector('input[name="betaalwijze"]:checked')?.value;
+    document.getElementById('error-betaalwijze-single').style.display = betaalwijze ? 'none' : 'block';
+    if (!betaalwijze) valid = false;
+
+    if (!betaling.checked || !gegevens.checked || !voorwaarden.checked) valid = false;
+
+    if (!valid) {
+      document.getElementById('error-stap5').style.display = 'block';
+      return;
+    }
+    document.getElementById('error-stap5').style.display = 'none';
+
+    const btn = document.getElementById('submitBtn');
+    btn.textContent = 'Verzenden...';
+    btn.disabled = true;
+
+    const data = {
+      inschrijving_voor    : selectedCategory,
+      voornaam             : document.getElementById('voornaam').value,
+      achternaam           : document.getElementById('achternaam').value,
+      geboortedatum        : dutchDateToISO(document.getElementById('geboortedatum').value),
+      telefoon             : document.getElementById('telefoon').value,
+      email                : document.getElementById('email').value,
+      adres                : document.getElementById('adres').value,
+      postcode             : document.getElementById('postcode').value,
+      woonplaats           : document.getElementById('woonplaats').value,
+      niveau               : document.querySelector('input[name="niveau"]:checked')?.value,
+      rooster              : document.querySelector('input[name="rooster"]:checked')?.value,
+      rekeningnummer       : rek.value,
+      naam_rekeninghouder  : naamRek.value,
+      betaalwijze          : betaalwijze,
+      volgend_kind         : document.getElementById('volgend_kind').checked,
+      // Contact person
+      cp_anders            : cpAnders,
+      cp_voornaam          : cpAnders ? document.getElementById('cp_voornaam').value   : null,
+      cp_achternaam        : cpAnders ? document.getElementById('cp_achternaam').value : null,
+      cp_telefoon          : cpAnders ? document.getElementById('cp_telefoon').value   : null,
+    };
+
+    try {
+      const res = await fetch(FORM_ENDPOINT, {
+        method : 'POST',
+        headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+        body   : JSON.stringify(data),
+      });
+
+      if (res.ok) {
+        lastBank = { rekeningnummer: rek.value, naam_rekeninghouder: naamRek.value };
+        document.getElementById('msfProgress').style.display = 'none';
+        document.getElementById('step5').classList.remove('active');
+        document.getElementById('msfSuccess').classList.add('visible');
+      } else {
+        btn.textContent = 'Verstuur inschrijving';
+        btn.disabled = false;
+
+        const body = await res.json().catch(() => null);
+        if (body && body.code === 'rooster_full') {
+          const staleRadio = document.querySelector('input[name="rooster"]:checked');
+          if (staleRadio) { staleRadio.checked = false; staleRadio.closest('.msf-radio-card').classList.remove('selected'); }
+          roosterCounts = null;
+          roosterCountsPromise = null;
+          fetchRoosterCounts();
+          goToStep(4);
+          alert('Dit lesdagen-tijdslot is helaas net vol geraakt. Kies een ander tijdslot.');
+        } else {
+          alert('Er is iets misgegaan. Probeer het opnieuw of neem contact met ons op.');
+        }
+      }
+    } catch {
+      btn.textContent = 'Verstuur inschrijving';
+      btn.disabled = false;
+      alert('Verbindingsfout. Controleer je internetverbinding en probeer opnieuw.');
+    }
+  }
+
+  // ══════════════════════════════════════════════════════════
+  //  NOG IEMAND INSCHRIJVEN — reset naar stap 1
+  // ══════════════════════════════════════════════════════════
+  function startNewInschrijving() {
+    const savedBank = document.getElementById('keepBank').checked ? lastBank : null;
+    const wrap = document.querySelector('.msf-wrapper');
+
+    // Verberg successcherm
+    document.getElementById('msfSuccess').classList.remove('visible');
+
+    // Leeg alle velden (behalve die op het successcherm zelf)
+    wrap.querySelectorAll('input').forEach(el => {
+      if (el.closest('#msfSuccess')) return;
+      if (el.type === 'checkbox' || el.type === 'radio') el.checked = false;
+      else el.value = '';
+    });
+    wrap.querySelectorAll('select').forEach(el => { el.selectedIndex = 0; });
+
+    // Wis fout- en selectie-statussen
+    wrap.querySelectorAll('.error').forEach(el => el.classList.remove('error'));
+    wrap.querySelectorAll('.msf-field-error.visible').forEach(el => el.classList.remove('visible'));
+    wrap.querySelectorAll('.msf-step-error').forEach(el => el.style.display = 'none');
+    wrap.querySelectorAll('.msf-radio-card.selected').forEach(el => el.classList.remove('selected'));
+
+    // Reset contactpersoon-toggle
+    cpAnders = false;
+    document.getElementById('cpSection').classList.remove('visible');
+    document.getElementById('cpToggleRow').classList.remove('active');
+    const telLabel = document.querySelector('#field-telefoon-ingeschrevene label');
+    if (telLabel) telLabel.innerHTML = 'Telefoonnummer (WhatsApp) <span style="color:#d32f2f">*</span>';
+
+    // Reset kinderenlijst naar één leeg kaartje
+    document.getElementById('childrenList').innerHTML = '';
+    childSeq = 0;
+    addChild();
+
+    // Alle panelen verbergen, stap 1 tonen
+    document.querySelectorAll('.msf-step-panel').forEach(p => p.classList.remove('active'));
+    document.getElementById('step1').classList.add('active');
+
+    // Reset state + voortgangsbalken naar stap 1
+    currentStep = 1;
+    bulkStep = 1;
+    selectedCategory = null;
+    document.querySelectorAll('#msfProgress .msf-step-indicator, #msfProgressBulk .msf-step-indicator').forEach(ind => {
+      ind.classList.remove('active', 'completed');
+      if (parseInt(ind.dataset.step) === 1) ind.classList.add('active');
+    });
+
+    // Terug naar 'één inschrijving' (herstelt categorie/bulk-zichtbaarheid + knoppen)
+    setMode('single');
+
+    // Verzendknoppen weer inschakelen
+    ['submitBtn', 'submitBtnBulk'].forEach(id => {
+      const b = document.getElementById(id);
+      if (b) { b.disabled = false; b.textContent = 'Verstuur inschrijving'; }
+    });
+
+    // Bankgegevens herstellen indien gewenst
+    if (savedBank) {
+      document.getElementById('rekeningnummer').value        = savedBank.rekeningnummer;
+      document.getElementById('naam_rekeninghouder').value   = savedBank.naam_rekeninghouder;
+      document.getElementById('b_rekeningnummer').value      = savedBank.rekeningnummer;
+      document.getElementById('b_naam_rekeninghouder').value = savedBank.naam_rekeninghouder;
+    }
+
+    wrap.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }
+</script>
