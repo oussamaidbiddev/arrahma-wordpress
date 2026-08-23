@@ -369,7 +369,7 @@ Zorg dat de plugin "Arrahma Inschrijvingen" geactiveerd is in WordPress → Plug
         </div>
       </label>
 
-      <label class="msf-radio-card">
+      <!-- <label class="msf-radio-card">
         <input type="radio" name="inschrijving_voor" value="tieners_broeders">
         <div class="msf-radio-card-text">
           <strong>Tieners — Broeders</strong>
@@ -399,7 +399,7 @@ Zorg dat de plugin "Arrahma Inschrijvingen" geactiveerd is in WordPress → Plug
           <strong>Broeders</strong>
           <span>18 jaar en ouder</span>
         </div>
-      </label>
+      </label> -->
 
       </div>
     </div>
@@ -1075,16 +1075,14 @@ Zorg dat de plugin "Arrahma Inschrijvingen" geactiveerd is in WordPress → Plug
     return `${yyyy}-${mm}-${dd}`;
   }
 
-  /** Whole-years age from an already-validated dd-mm-jjjj string, measured against today. */
-  function ageFromDutchDate(str) {
-    const [, dd, mm, yyyy] = /^(\d{2})-(\d{2})-(\d{4})$/.exec(str.trim());
-    const birth = new Date(yyyy, mm - 1, dd);
-    const now = new Date();
-    let age = now.getFullYear() - birth.getFullYear();
-    const hadBirthdayThisYear = (now.getMonth() > birth.getMonth()) ||
-      (now.getMonth() === birth.getMonth() && now.getDate() >= birth.getDate());
-    if (!hadBirthdayThisYear) age--;
-    return age;
+  /**
+   * Leeftijd die het kind dit kalenderjaar bereikt (of al heeft), ongeacht of de verjaardag
+   * al is geweest. Een kind dat dit jaar 6 wordt telt dus al mee als 6 — voorkomt dat een
+   * kind wordt geweigerd omdat de verjaardag nog moet komen.
+   */
+  function ageThisYear(str) {
+    const [, , , yyyy] = /^(\d{2})-(\d{2})-(\d{4})$/.exec(str.trim());
+    return new Date().getFullYear() - Number(yyyy);
   }
 
   /** Fetches rooster seat counts once per form session and caches the result. */
@@ -1325,7 +1323,7 @@ Zorg dat de plugin "Arrahma Inschrijvingen" geactiveerd is in WordPress → Plug
         gebEl.classList.add('error');
         valid = false;
       } else if (gebEl.value.trim()) {
-        const age = ageFromDutchDate(gebEl.value);
+        const age = ageThisYear(gebEl.value);
         if (age < 6 || age > 11) {
           gebEl.classList.add('error');
           valid = false;
@@ -1589,7 +1587,7 @@ Zorg dat de plugin "Arrahma Inschrijvingen" geactiveerd is in WordPress → Plug
         gebErr.classList.add('visible');
         valid = false;
       } else if (gebEl && gebEl.value.trim() && selectedCategory === 'kinderen') {
-        const age = ageFromDutchDate(gebEl.value);
+        const age = ageThisYear(gebEl.value);
         if (age < 6 || age > 11) {
           gebEl.classList.add('error');
           gebErr.textContent = 'Voor de categorie Kinderen geldt een leeftijd van 6 t/m 11 jaar.';

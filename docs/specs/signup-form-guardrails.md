@@ -29,7 +29,7 @@ Both are **client-side only** (JS). No server-side (PHP) enforcement in this pas
 ## 2. Age guard
 
 - **Range:** reject if age < 6 or age > 11 (inclusive bounds: 6–11 allowed).
-- **Reference date:** today's date (not school-year start). `age = floor(months between geboortedatum and today / 12)` or equivalent whole-years calculation.
+- **Reference date (updated 2026-08-17):** **calendar-year age**, not exact-date age — `age = currentYear - birthYear`, ignoring whether the birthday has happened yet this year. A child turning 6 anytime this year counts as 6 all year (was previously rejected until their actual birthday, which real families hit). Applied symmetrically to the upper bound too: a child turning 12 this year is excluded from Kinderen from January onward, not just after their birthday — kept for consistency (one rule, not two different age computations in the same check) and to avoid mid-year eligibility flips. Implemented as `ageThisYear()` in `index.html` (previously `ageFromDutchDate()`, which computed exact age).
 - **Scope:**
   - Single mode: only enforced when `selectedCategory === 'kinderen'`. Other categories (tieners, zusters 18+, broeders 18+) get no age check, same as today.
   - Bulk mode: always enforced (bulk mode is Kinderen-only by construction already).
