@@ -2,15 +2,19 @@
 /**
  * Plugin Name: Arrahma Inschrijvingen
  * Description: Slaat lesaanmeldingen op in de database en toont ze in een overzichtspagina met CSV-export.
- * Version:     1.7.0
+ * Version:     1.8.0
  * Author:      Vereniging Arrahma
  */
 
 if ( ! defined( 'ABSPATH' ) ) exit;
 
 define( 'ARRAHMA_TABLE',       'arrahma_inschrijvingen' );
-define( 'ARRAHMA_VERSION',     '1.7.0' );
+define( 'ARRAHMA_VERSION',     '1.8.0' );
 define( 'ARRAHMA_ROOSTER_CAP', 30 ); // max. aantal inschrijvingen per lesdagen-tijdslot (categorie 'kinderen')
+
+// Staan inschrijvingen open? 'open' toont het formulier, 'gesloten' toont een bericht.
+define( 'ARRAHMA_FORM_MODE_OPTION',      'arrahma_form_mode' );
+define( 'ARRAHMA_CLOSED_MESSAGE_OPTION', 'arrahma_closed_message' );
 
 // Ouderavond-uitnodiging: prefill-doelvelden op het Google Form (zie docs/wayfinder/tickets/parent-meeting-emails/01-create-google-form.md)
 define( 'ARRAHMA_OUDERAVOND_FORM_ID',     '1FAIpQLSflfMJHypxN8eccuTc5ScD-UWaqzG941QJ2rvTKD-iK5l-q2g' );
@@ -108,6 +112,20 @@ function arrahma_roster_label( string $value ): string {
     return arrahma_roster_labels()[ $value ] ?? ( $value !== '' ? $value : '—' );
 }
 
+/** Standaardtekst als inschrijvingen gesloten zijn. Aan te passen via Instellingen. */
+const ARRAHMA_CLOSED_MESSAGE_DEFAULT = 'De inschrijvingen zijn op dit moment gesloten. Houd onze website en WhatsApp-groepen in de gaten voor het moment waarop de inschrijvingen weer opengaan.';
+
+/** Staan de inschrijvingen open? Standaard ja. */
+function arrahma_form_is_open(): bool {
+    return get_option( ARRAHMA_FORM_MODE_OPTION, 'open' ) !== 'gesloten';
+}
+
+/** Bericht dat het formulier toont wanneer inschrijvingen gesloten zijn. */
+function arrahma_closed_message(): string {
+    $msg = trim( (string) get_option( ARRAHMA_CLOSED_MESSAGE_OPTION, '' ) );
+    return $msg !== '' ? $msg : ARRAHMA_CLOSED_MESSAGE_DEFAULT;
+}
+
 function arrahma_betaalwijze_labels(): array {
     return [
         'maandelijks' => 'Maandelijks',
@@ -157,7 +175,21 @@ add_action( 'rest_api_init', function () {
         'callback'            => 'arrahma_get_rooster_counts',
         'permission_callback' => '__return_true',
     ] );
+
+    register_rest_route( 'arrahma/v1', '/form-mode', [
+        'methods'             => 'GET',
+        'callback'            => 'arrahma_get_form_mode',
+        'permission_callback' => '__return_true',
+    ] );
 } );
+
+/** Of het inschrijfformulier open staat, plus de tekst bij gesloten. Publiek — geen persoonsgegevens. */
+function arrahma_get_form_mode() {
+    return rest_ensure_response( [
+        'open'    => arrahma_form_is_open(),
+        'message' => arrahma_closed_message(),
+    ] );
+}
 
 /** Aantal inschrijvingen per lesdagen-tijdslot, ongeacht status. Publiek — gebruikt door het embedded formulier. */
 function arrahma_get_rooster_counts() {
@@ -180,6 +212,12 @@ function arrahma_handle_submission( WP_REST_Request $request ) {
     global $wpdb;
 
     $data = $request->get_json_params() ?: $request->get_params();
+
+    // ── Inschrijvingen gesloten: ook serverzijde weigeren, zodat een reeds geopend
+    //    tabblad (of een directe POST) na sluiting geen inschrijving meer aanmaakt.
+    if ( ! arrahma_form_is_open() ) {
+        return new WP_Error( 'form_closed', arrahma_closed_message(), [ 'status' => 403 ] );
+    }
 
     // ── Bulk (meerdere kinderen) heeft een andere payload-vorm
     if ( ( $data['mode'] ?? '' ) === 'bulk' || ! empty( $data['children'] ) ) {
@@ -849,6 +887,15 @@ add_action( 'admin_menu', function () {
         'manage_options',
         'arrahma-dashboard',
         'arrahma_dashboard_page'
+    );
+
+    add_submenu_page(
+        'arrahma-inschrijvingen',
+        'Instellingen',
+        'Instellingen',
+        'manage_options',
+        'arrahma-instellingen',
+        'arrahma_settings_page'
     );
 } );
 
@@ -1568,6 +1615,82 @@ function arrahma_emails_page() {
         </script>
 
       <?php endif; ?>
+    </div>
+    <?php
+}
+
+// ─────────────────────────────────────────────────────────────
+// ADMIN PAGINA: INSTELLINGEN (inschrijvingen open/gesloten)
+// ─────────────────────────────────────────────────────────────
+function arrahma_settings_page() {
+    $notice = '';
+
+    if ( isset( $_POST['arrahma_save_settings'], $_POST['_wpnonce'] ) && wp_verify_nonce( $_POST['_wpnonce'], 'arrahma_save_settings' ) ) {
+        $mode = sanitize_text_field( wp_unslash( $_POST['form_mode'] ?? '' ) );
+        if ( in_array( $mode, [ 'open', 'gesloten' ], true ) ) {
+            update_option( ARRAHMA_FORM_MODE_OPTION, $mode );
+        }
+        update_option(
+            ARRAHMA_CLOSED_MESSAGE_OPTION,
+            sanitize_textarea_field( wp_unslash( $_POST['closed_message'] ?? '' ) )
+        );
+        $notice = 'Instellingen opgeslagen.';
+    }
+
+    $is_open = arrahma_form_is_open();
+    $message = arrahma_closed_message();
+    ?>
+    <div class="wrap">
+      <h1 style="display:flex;align-items:center;gap:.5rem">
+        <span class="dashicons dashicons-admin-settings" style="font-size:1.5rem;margin-top:3px"></span>
+        Instellingen
+      </h1>
+
+      <?php if ( $notice ) : ?>
+        <div class="notice notice-success is-dismissible"><p><?= esc_html( $notice ) ?></p></div>
+      <?php endif; ?>
+
+      <p style="color:#555;max-width:680px">
+        Bepaalt of bezoekers zich kunnen inschrijven. De wijziging is direct actief — het formulier
+        haalt deze instelling op zodra de pagina wordt geladen.
+      </p>
+
+      <div style="background:<?= $is_open ? '#eef7ee' : '#fff4e0' ?>;border:1px solid <?= $is_open ? '#c6e2c6' : '#f0d9a8' ?>;border-radius:10px;padding:.85rem 1.15rem;max-width:680px;margin:1rem 0;font-size:.9rem;color:#444">
+        Huidige status:
+        <strong style="color:<?= $is_open ? '#2e7d32' : '#a06800' ?>">
+          <?= $is_open ? 'Inschrijvingen staan open' : 'Inschrijvingen zijn gesloten' ?>
+        </strong>
+      </div>
+
+      <form method="post">
+        <?php wp_nonce_field( 'arrahma_save_settings' ); ?>
+
+        <div style="background:#fff;border:1px solid #e0e0e0;border-radius:10px;padding:1.25rem 1.5rem;max-width:680px;margin-bottom:1.25rem">
+          <h2 style="font-size:.8rem;text-transform:uppercase;letter-spacing:.08em;color:#2d3a4a;margin:0 0 1rem">Inschrijfformulier</h2>
+
+          <label style="display:block;margin-bottom:.85rem">
+            <input type="radio" name="form_mode" value="open" <?= checked( $is_open, true, false ) ?>>
+            <strong>Open</strong>
+            <span style="color:#888">— bezoekers zien het normale inschrijfformulier.</span>
+          </label>
+
+          <label style="display:block">
+            <input type="radio" name="form_mode" value="gesloten" <?= checked( $is_open, false, false ) ?>>
+            <strong>Gesloten</strong>
+            <span style="color:#888">— het formulier wordt verborgen en bezoekers zien onderstaand bericht.</span>
+          </label>
+        </div>
+
+        <div style="background:#fff;border:1px solid #e0e0e0;border-radius:10px;padding:1.25rem 1.5rem;max-width:680px">
+          <h2 style="font-size:.8rem;text-transform:uppercase;letter-spacing:.08em;color:#2d3a4a;margin:0 0 1rem">Bericht bij gesloten inschrijvingen</h2>
+          <textarea name="closed_message" rows="4" class="large-text"><?= esc_textarea( $message ) ?></textarea>
+          <p class="description">Laat leeg om de standaardtekst te gebruiken.</p>
+        </div>
+
+        <p class="submit">
+          <button type="submit" name="arrahma_save_settings" value="1" class="button button-primary">Instellingen opslaan</button>
+        </p>
+      </form>
     </div>
     <?php
 }

@@ -296,6 +296,27 @@ Zorg dat de plugin "Arrahma Inschrijvingen" geactiveerd is in WordPress → Plug
 
 <div class="msf-wrapper">
 
+  <!-- Zichtbaar tot bekend is of de inschrijvingen open staan -->
+  <div id="formLoading" style="text-align:center;padding:3rem 1rem;color:#999;font-size:.9rem">
+    Formulier laden…
+  </div>
+
+  <!-- Getoond wanneer de inschrijvingen gesloten zijn -->
+  <div id="formClosed" style="display:none;text-align:center;padding:3rem 1.5rem">
+    <div style="font-size:2.5rem;margin-bottom:1rem">🔒</div>
+    <h2 style="font-size:1.3rem;font-weight:700;margin-bottom:.75rem;color:#1a1a1a">Inschrijvingen gesloten</h2>
+    <p id="formClosedMessage" style="color:#777;font-size:.95rem;line-height:1.7;max-width:520px;margin:0 auto"></p>
+    <div style="border-left:3px solid #2d3a4a;padding:14px 18px;background:#f4f6f8;border-radius:0 6px 6px 0;margin:2rem auto 0;max-width:520px;text-align:left">
+      <p style="margin:0;font-size:.85rem;color:#555;line-height:1.6">
+        Vragen? Neem contact op via
+        <a href="mailto:info@vereniging-arrahma.nl" style="color:#2d3a4a;font-weight:600;text-decoration:none">info@vereniging-arrahma.nl</a>.
+      </p>
+    </div>
+  </div>
+
+  <!-- ══════════════ INSCHRIJFFORMULIER ══════════════ -->
+  <div id="signupUI" style="display:none">
+
   <!-- Progress -->
   <div class="msf-progress" id="msfProgress">
     <div class="msf-step-indicator active" data-step="1">
@@ -896,11 +917,14 @@ Zorg dat de plugin "Arrahma Inschrijvingen" geactiveerd is in WordPress → Plug
     </div>
   </div>
 
+  </div><!-- /#signupUI -->
+
 </div>
 
 <script>
   const FORM_ENDPOINT           = 'https://www.vereniging-arrahma.nl/wp-json/arrahma/v1/inschrijving';
   const ROOSTER_COUNTS_ENDPOINT = 'https://www.vereniging-arrahma.nl/wp-json/arrahma/v1/rooster-counts';
+  const FORM_MODE_ENDPOINT      = 'https://www.vereniging-arrahma.nl/wp-json/arrahma/v1/form-mode';
   const ROOSTER_CAP             = 30;
 
   let currentStep      = 1;
@@ -1788,4 +1812,35 @@ Zorg dat de plugin "Arrahma Inschrijvingen" geactiveerd is in WordPress → Plug
 
     wrap.scrollIntoView({ behavior: 'smooth', block: 'start' });
   }
+
+  // ══════════════════════════════════════════════════════════
+  //  OPEN / GESLOTEN — bepaalt wat de bezoeker te zien krijgt
+  // ══════════════════════════════════════════════════════════
+  function showSignupForm() {
+    document.getElementById('formLoading').style.display = 'none';
+    document.getElementById('formClosed').style.display  = 'none';
+    document.getElementById('signupUI').style.display    = 'block';
+  }
+
+  function showClosedMessage(message) {
+    if (message) {
+      // textContent (geen innerHTML): tekst uit de admin kan geen opmaak injecteren.
+      document.getElementById('formClosedMessage').textContent = message;
+    }
+    document.getElementById('formLoading').style.display = 'none';
+    document.getElementById('signupUI').style.display    = 'none';
+    document.getElementById('formClosed').style.display  = 'block';
+  }
+
+  (function initFormMode() {
+    fetch(FORM_MODE_ENDPOINT)
+      .then(res => res.ok ? res.json() : null)
+      .then(data => {
+        if (data && data.open === false) showClosedMessage(data.message);
+        else showSignupForm();
+      })
+      // Bij een fout tonen we het formulier: falen naar het huidige gedrag,
+      // zodat een tijdelijke storing geen inschrijvingen blokkeert.
+      .catch(() => showSignupForm());
+  })();
 </script>
