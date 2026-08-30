@@ -258,6 +258,10 @@ Zorg dat de plugin "Arrahma Inschrijvingen" geactiveerd is in WordPress → Plug
     cursor: pointer; transition: background .2s, color .2s;
   }
   .msf-mode-btn:hover { background: #e9edf1 !important; color: #2d3a4a !important; }
+  .msf-mode-btn:disabled,
+  .msf-mode-btn:disabled:hover {
+    background: transparent !important; color: #bbb !important; cursor: not-allowed;
+  }
   .msf-mode-btn.active,
   .msf-mode-btn.active:hover {
     background: #2d3a4a !important; color: #fff !important;
@@ -1165,6 +1169,72 @@ Zorg dat de plugin "Arrahma Inschrijvingen" geactiveerd is in WordPress → Plug
     if (jaarEl)  jaarEl.textContent  = formatPrijs(jaar);
     if (maandRow) maandRow.style.display = cadence === 'jaarlijks' ? 'none' : 'block';
     if (jaarRow)  jaarRow.style.display  = cadence === 'jaarlijks' ? 'block' : 'none';
+  }
+
+  // ══════════════════════════════════════════════════════════
+  //  DOELGROEPEN OP STAP 1 VOLGEN DE STATUS VAN HUN LESMOMENTEN
+  //  geen zichtbaar lesmoment      => doelgroep helemaal verbergen
+  //  wel zichtbaar, niets kiesbaar => doelgroep grijs, met badge "Gesloten"
+  // ══════════════════════════════════════════════════════════
+
+  /** De lesblokken (kinderen) of lesgroepen die bij één doelgroep horen. */
+  function slotsVoorCategorie(categorie) {
+    if (categorie === 'kinderen') return KINDEREN_ROOSTERS.slice();
+    return Object.keys(GROEPEN).filter(k => GROEPEN[k].categorie === categorie);
+  }
+
+  function categorieStatus(categorie) {
+    const zichtbaar = slotsVoorCategorie(categorie).filter(k => !slotIsHidden(k));
+    if (zichtbaar.length === 0)            return 'verborgen';
+    if (!zichtbaar.some(slotIsSelectable)) return 'gesloten';
+    return 'open';
+  }
+
+  function zetGeslotenBadge(kaart, tonen) {
+    const titel = kaart.querySelector('.msf-radio-card-text strong');
+    if (!titel) return;
+    const badge = titel.querySelector('.vol-badge');
+    if (tonen && !badge) {
+      const nieuw = document.createElement('span');
+      nieuw.className   = 'vol-badge';
+      nieuw.textContent = 'Gesloten';
+      titel.appendChild(nieuw);
+    } else if (!tonen && badge) {
+      badge.remove();
+    }
+  }
+
+  /** Past de doelgroepkaarten op stap 1 aan, plus de bulk-knop (die is kinderen-only). */
+  function applyCategoryStatuses() {
+    document.querySelectorAll('input[name="inschrijving_voor"]').forEach(radio => {
+      const kaart  = radio.closest('.msf-radio-card');
+      const status = categorieStatus(radio.value);
+
+      kaart.style.display = status === 'verborgen' ? 'none' : '';
+      radio.disabled      = status !== 'open';
+      zetGeslotenBadge(kaart, status === 'gesloten');
+
+      // Een al gekozen doelgroep die dichtgaat, weer loslaten.
+      if (radio.checked && status !== 'open') {
+        radio.checked = false;
+        kaart.classList.remove('selected');
+        if (selectedCategory === radio.value) selectedCategory = null;
+      }
+    });
+
+    const bulkBtn = document.querySelector('.msf-mode-btn[data-mode="bulk"]');
+    const kStatus = categorieStatus('kinderen');
+    if (bulkBtn) {
+      bulkBtn.style.display = kStatus === 'verborgen' ? 'none' : '';
+      bulkBtn.disabled      = kStatus !== 'open';
+      if (kStatus !== 'open' && formMode === 'bulk') setMode('single');
+    }
+  }
+
+  /** Is er nog minstens één doelgroep waarop ingeschreven kan worden? */
+  function eenDoelgroepOpen() {
+    return [...document.querySelectorAll('input[name="inschrijving_voor"]')]
+      .some(radio => categorieStatus(radio.value) === 'open');
   }
 
   // ── Stap 1: radio cards ──
@@ -2076,8 +2146,15 @@ Zorg dat de plugin "Arrahma Inschrijvingen" geactiveerd is in WordPress → Plug
       .then(data => {
         if (data && data.slots) slotStatus = data.slots;
         if (data && data.caps)  slotCaps   = data.caps;
-        if (data && data.open === false) showClosedMessage(data.message);
-        else showSignupForm();
+        applyCategoryStatuses();
+
+        // Staat geen enkele doelgroep meer open, dan is het formulier feitelijk dicht:
+        // vijf grijze kaarten zonder uitleg is een doodlopende weg.
+        if ((data && data.open === false) || !eenDoelgroepOpen()) {
+          showClosedMessage(data && data.message);
+        } else {
+          showSignupForm();
+        }
       })
       // Bij een fout tonen we het formulier: falen naar het huidige gedrag,
       // zodat een tijdelijke storing geen inschrijvingen blokkeert.
