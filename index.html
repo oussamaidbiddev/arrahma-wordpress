@@ -305,9 +305,11 @@ Zorg dat de plugin "Arrahma Inschrijvingen" geactiveerd is in WordPress → Plug
   <div id="formClosed" style="display:none;text-align:center;padding:3rem 1.5rem">
     <div style="font-size:2.5rem;margin-bottom:1rem">🔒</div>
     <h2 style="font-size:1.3rem;font-weight:700;margin-bottom:.75rem;color:#1a1a1a">Inschrijvingen gesloten</h2>
-    <p id="formClosedMessage" style="color:#777;font-size:.95rem;line-height:1.7;max-width:520px;margin:0 auto"></p>
+    <!-- Standaardtekst staat in de HTML zodat deze <p> nooit leeg is: sommige thema's verbergen
+         lege paragrafen (p:empty { display:none }). JS overschrijft dit met de tekst uit Instellingen. -->
+    <p id="formClosedMessage" style="display:block;color:#777;font-size:.95rem;line-height:1.7;max-width:520px;margin:0 auto">De inschrijvingen zijn op dit moment gesloten. Houd onze website en WhatsApp-groepen in de gaten voor het moment waarop de inschrijvingen weer opengaan.</p>
     <div style="border-left:3px solid #2d3a4a;padding:14px 18px;background:#f4f6f8;border-radius:0 6px 6px 0;margin:2rem auto 0;max-width:520px;text-align:left">
-      <p style="margin:0;font-size:.85rem;color:#555;line-height:1.6">
+      <p style="display:block;margin:0;font-size:.85rem;color:#555;line-height:1.6">
         Vragen? Neem contact op via
         <a href="mailto:info@vereniging-arrahma.nl" style="color:#2d3a4a;font-weight:600;text-decoration:none">info@vereniging-arrahma.nl</a>.
       </p>
@@ -325,15 +327,15 @@ Zorg dat de plugin "Arrahma Inschrijvingen" geactiveerd is in WordPress → Plug
     </div>
     <div class="msf-step-indicator" data-step="2">
       <div class="msf-bubble">2</div>
-      <div class="msf-step-label">Gegevens</div>
+      <div class="msf-step-label">Niveau</div>
     </div>
     <div class="msf-step-indicator" data-step="3">
       <div class="msf-bubble">3</div>
-      <div class="msf-step-label">Niveau</div>
+      <div class="msf-step-label">Lesdagen</div>
     </div>
     <div class="msf-step-indicator" data-step="4">
       <div class="msf-bubble">4</div>
-      <div class="msf-step-label">Lesdagen</div>
+      <div class="msf-step-label">Gegevens</div>
     </div>
     <div class="msf-step-indicator" data-step="5">
       <div class="msf-bubble">5</div>
@@ -390,37 +392,37 @@ Zorg dat de plugin "Arrahma Inschrijvingen" geactiveerd is in WordPress → Plug
         </div>
       </label>
 
-      <!-- <label class="msf-radio-card">
-        <input type="radio" name="inschrijving_voor" value="tieners_broeders">
+      <label class="msf-radio-card">
+        <input type="radio" name="inschrijving_voor" value="broeders_jongeren">
         <div class="msf-radio-card-text">
-          <strong>Tieners — Broeders</strong>
-          <span>12 tot 17 jaar</span>
+          <strong>Broeders — jongeren</strong>
+          <span>circa 12 t/m 16 jaar</span>
         </div>
       </label>
 
       <label class="msf-radio-card">
-        <input type="radio" name="inschrijving_voor" value="tieners_zusters">
+        <input type="radio" name="inschrijving_voor" value="broeders_volwassenen">
         <div class="msf-radio-card-text">
-          <strong>Tieners — Zusters</strong>
-          <span>12 tot 17 jaar</span>
+          <strong>Broeders — volwassenen</strong>
+          <span>vanaf circa 17 jaar</span>
         </div>
       </label>
 
       <label class="msf-radio-card">
-        <input type="radio" name="inschrijving_voor" value="zusters_18plus">
+        <input type="radio" name="inschrijving_voor" value="zusters_jongeren">
         <div class="msf-radio-card-text">
-          <strong>Zusters</strong>
-          <span>18 jaar en ouder</span>
+          <strong>Zusters — jongeren</strong>
+          <span>circa 12 t/m 16 jaar</span>
         </div>
       </label>
 
       <label class="msf-radio-card">
-        <input type="radio" name="inschrijving_voor" value="broeders_18plus">
+        <input type="radio" name="inschrijving_voor" value="zusters_volwassenen">
         <div class="msf-radio-card-text">
-          <strong>Broeders</strong>
-          <span>18 jaar en ouder</span>
+          <strong>Zusters — volwassenen</strong>
+          <span>vanaf circa 17 jaar</span>
         </div>
-      </label> -->
+      </label>
 
       </div>
     </div>
@@ -432,7 +434,7 @@ Zorg dat de plugin "Arrahma Inschrijvingen" geactiveerd is in WordPress → Plug
   </div>
 
   <!-- ══════════════ STAP 2 ══════════════ -->
-  <div class="msf-step-panel" id="step2">
+  <div class="msf-step-panel" id="step4">
     <p class="msf-step-title">Gegevens</p>
     <p class="msf-step-sub">Vul de gegevens in van de persoon die zich inschrijft.</p>
 
@@ -531,15 +533,22 @@ Zorg dat de plugin "Arrahma Inschrijvingen" geactiveerd is in WordPress → Plug
     </div>
 
     <div class="msf-nav">
-      <button class="msf-btn msf-btn-secondary" onclick="goToStep(1)">← Terug</button>
-      <button class="msf-btn msf-btn-primary" onclick="goToStep(3)">Volgende →</button>
+      <button class="msf-btn msf-btn-secondary" onclick="gegevensBack()">← Terug</button>
+      <button class="msf-btn msf-btn-primary" onclick="goToStep(5)">Volgende →</button>
     </div>
   </div>
 
   <!-- ══════════════ STAP 3 ══════════════ -->
-  <div class="msf-step-panel" id="step3">
-    <p class="msf-step-title">Indicatie niveau</p>
-    <p class="msf-step-sub">Geef een indicatie van het huidige niveau.</p>
+  <div class="msf-step-panel" id="step2">
+    <p class="msf-step-title" id="step3Title">Indicatie niveau</p>
+    <p class="msf-step-sub" id="step3Sub">Geef een indicatie van het huidige niveau.</p>
+
+    <!-- Lesgroepen voor jongeren & volwassenen: niveau + vaste lesdag/lestijd in één keuze.
+         Wordt door JS gevuld op basis van de gekozen doelgroep. -->
+    <div id="niveauGroepen" style="display:none"></div>
+
+    <!-- Niveaukeuze voor de categorie Kinderen (ongewijzigd) -->
+    <div id="niveauKinderen">
 
     <div class="msf-info-box">
       <strong>Let op:</strong> Dit is alleen een indicatie. Na inschrijving zal de vereniging ook een eigen toetsing van het niveau uitvoeren om in de juiste groep in te delen.
@@ -572,16 +581,18 @@ Zorg dat de plugin "Arrahma Inschrijvingen" geactiveerd is in WordPress → Plug
       </label>
 
     </div>
+    </div><!-- /#niveauKinderen -->
+
     <p class="msf-step-error" id="error-stap3">Kies een niveau om verder te gaan.</p>
 
     <div class="msf-nav">
-      <button class="msf-btn msf-btn-secondary" onclick="goToStep(2)">← Terug</button>
-      <button class="msf-btn msf-btn-primary" onclick="step3Next()">Volgende →</button>
+      <button class="msf-btn msf-btn-secondary" onclick="goToStep(1)">← Terug</button>
+      <button class="msf-btn msf-btn-primary" onclick="niveauNext()">Volgende →</button>
     </div>
   </div>
 
   <!-- ══════════════ STAP 4 ══════════════ -->
-  <div class="msf-step-panel" id="step4">
+  <div class="msf-step-panel" id="step3">
     <p class="msf-step-title">Lesdagen</p>
     <p class="msf-step-sub">Kies je voorkeur voor de lesdagen.</p>
 
@@ -635,8 +646,8 @@ Zorg dat de plugin "Arrahma Inschrijvingen" geactiveerd is in WordPress → Plug
     <p class="msf-step-error" id="error-stap4">Kies een voorkeur voor de lesdagen om verder te gaan.</p>
 
     <div class="msf-nav">
-      <button class="msf-btn msf-btn-secondary" onclick="goToStep(3)">← Terug</button>
-      <button class="msf-btn msf-btn-primary" onclick="goToStep(5)">Volgende →</button>
+      <button class="msf-btn msf-btn-secondary" onclick="goToStep(2)">← Terug</button>
+      <button class="msf-btn msf-btn-primary" onclick="goToStep(4)">Volgende →</button>
     </div>
   </div>
 
@@ -645,6 +656,7 @@ Zorg dat de plugin "Arrahma Inschrijvingen" geactiveerd is in WordPress → Plug
     <p class="msf-step-title">Akkoord & bevestiging</p>
     <p class="msf-step-sub">Vul je bankgegevens in en geef akkoord op de voorwaarden.</p>
 
+    <!-- Bedragen zijn categorie-afhankelijk (kinderen vs. jongeren & volwassenen) -->
     <div class="msf-info-box">
       <p id="prijs-regel-maandelijks" style="margin:0">
         De kosten voor de lessen zijn <strong>€ <span id="les-prijs-maand"></span> per maand</strong>, via automatische incasso (niet tijdens de zomervakantie).
@@ -722,7 +734,7 @@ Zorg dat de plugin "Arrahma Inschrijvingen" geactiveerd is in WordPress → Plug
     <p class="msf-step-error" id="error-stap5">Vul alle verplichte velden in en geef akkoord op alle punten.</p>
 
     <div class="msf-nav">
-      <button class="msf-btn msf-btn-secondary" onclick="step5Back()">← Terug</button>
+      <button class="msf-btn msf-btn-secondary" onclick="goToStep(4)">← Terug</button>
       <button class="msf-btn msf-btn-primary" id="submitBtn" onclick="submitForm()">Verstuur inschrijving</button>
     </div>
   </div>
@@ -936,14 +948,159 @@ Zorg dat de plugin "Arrahma Inschrijvingen" geactiveerd is in WordPress → Plug
   let roosterCounts        = null;
   let roosterCountsPromise = null;
 
-  // ── Prijzen (Onderwijsreglement v1.0) ──
+  // ── Status per lesblok/lesgroep, ingesteld via Instellingen in de admin ──
+  // 'open' | 'gesloten' (zichtbaar, niet kiesbaar) | 'verborgen'. Onbekend = 'open'.
+  let slotStatus = {};
+
+  function slotIsHidden(key)     { return slotStatus[key] === 'verborgen'; }
+  function slotIsSelectable(key) { return (slotStatus[key] || 'open') === 'open'; }
+
+  // ══════════════════════════════════════════════════════════
+  //  LESGROEPEN — jongeren & volwassenen (briefing 2026–2027)
+  //  Moet gelijk blijven aan arrahma_groepen() in arrahma-inschrijvingen.php.
+  // ══════════════════════════════════════════════════════════
+  // TODO: PLACEHOLDER — definitieve groepsgrootte nog navragen (= ARRAHMA_GROEP_CAP in de plugin).
+  const GROEP_CAP         = 20;
+  const KINDEREN_ROOSTERS = ['za_zo_blok1', 'za_zo_blok2', 'za_zo_blok3', 'ma_wo', 'di_do'];
+  const NIVEAUTOETS_EMAIL = 'communicatie@vereniging-arrahma.nl';
+
+  function capForKey(key) {
+    return KINDEREN_ROOSTERS.includes(key) ? ROOSTER_CAP : GROEP_CAP;
+  }
+
+  const NIVEAU_OMSCHRIJVING = {
+    n1: 'Je start bij de basis van de Arabische taal. Je leert het Arabische alfabet, de letters, klanken en uitspraak en maakt een begin met lezen en schrijven.',
+    n2: 'Je kent en herkent de Arabische letters en hebt al enige basis, maar leest nog niet zelfstandig en vloeiend. Je werkt verder aan het verbinden van letters, uitspraak en het steeds vlotter lezen van woorden en korte teksten.',
+    n3: 'Je kunt Arabische teksten lezen en gaat verder met woordenschat, tekstbegrip en de basisprincipes van de Arabische grammatica.',
+    n4: 'Je beschikt over basiskennis van de Arabische grammatica. Je verdiept deze kennis en leert grammaticale regels praktisch toe te passen bij het lezen, begrijpen en verwerken van Arabische teksten.',
+    n5: 'Gevorderd niveau voor deelnemers met voldoende basiskennis van de Arabische taal en grammatica. Voor deelname gelden instapvoorwaarden en vindt vooraf een niveautoets plaats.',
+    z_basis: 'Je start bij de basis van de Arabische taal. Je leert het Arabische alfabet, de letters, klanken en uitspraak en maakt een begin met lezen en schrijven.',
+    z_gevorderd: 'Je kent en herkent de Arabische letters en kunt al lezen. Vanuit deze basis ga je verder de diepte in met leesvaardigheid, woordenschat, begrip, schrijven en verdere ontwikkeling van de Arabische taal.',
+  };
+
+  const NIVEAU_TITEL = {
+    n1: 'Niveau 1 — Alif Baa | Basis',
+    n2: 'Niveau 2 — Letters herkennen & leesvaardigheid',
+    n3: 'Niveau 3 — Lezen & basisgrammatica',
+    n4: 'Niveau 4 — Grammatica toepassen & tekstverwerking',
+    n5: 'Niveau 5 — al-Ājurrūmiyyah',
+    z_basis: 'Basis — Alif Baa',
+    z_gevorderd: 'Gevorderd Arabisch',
+  };
+
+  // toets: true => geen directe inschrijving, eerst niveautoets aanvragen.
+  const GROEPEN = {
+    br_volw_n1_zo: { categorie: 'broeders_volwassenen', niveau: 'n1', dag: 'Zondag',   tijd: '09:30–11:00' },
+    br_volw_n2_zo: { categorie: 'broeders_volwassenen', niveau: 'n2', dag: 'Zondag',   tijd: '11:00–12:30' },
+    br_volw_n3_za: { categorie: 'broeders_volwassenen', niveau: 'n3', dag: 'Zaterdag', tijd: '09:30–11:00' },
+    br_volw_n4_zo: { categorie: 'broeders_volwassenen', niveau: 'n4', dag: 'Zondag',   tijd: '09:30–11:00' },
+    br_jong_n1_zo: { categorie: 'broeders_jongeren',    niveau: 'n1', dag: 'Zondag',   tijd: '11:00–12:30' },
+    br_jong_n2_zo: { categorie: 'broeders_jongeren',    niveau: 'n2', dag: 'Zondag',   tijd: '11:00–12:30' },
+    br_jong_n3_za: { categorie: 'broeders_jongeren',    niveau: 'n3', dag: 'Zaterdag', tijd: '11:30–13:00' },
+    br_volw_n5_zo: { categorie: 'broeders_volwassenen', niveau: 'n5', dag: 'Zondag', tijd: '19:00', toets: true },
+    br_jong_n5_zo: { categorie: 'broeders_jongeren',    niveau: 'n5', dag: 'Zondag', tijd: '19:00', toets: true },
+    zu_volw_basis_ma: { categorie: 'zusters_volwassenen', niveau: 'z_basis',     dag: 'Maandag',   tijd: '19:00–20:30' },
+    zu_volw_gev_do:   { categorie: 'zusters_volwassenen', niveau: 'z_gevorderd', dag: 'Donderdag', tijd: '19:00–20:30' },
+    zu_jong_basis_wo: { categorie: 'zusters_jongeren',    niveau: 'z_basis',     dag: 'Woensdag',  tijd: '18:00–19:30' },
+    zu_jong_gev_wo:   { categorie: 'zusters_jongeren',    niveau: 'z_gevorderd', dag: 'Woensdag',  tijd: '18:00–19:30' },
+  };
+
+  function getSelectedGroepKey() {
+    return document.querySelector('input[name="groep"]:checked')?.value || '';
+  }
+
+  /** Bouwt de lesgroep-kaarten voor de gekozen doelgroep (niveau + vaste lesdag/lestijd). */
+  function renderGroepen() {
+    const wrap = document.getElementById('niveauGroepen');
+    // 'verborgen' groepen tonen we helemaal niet.
+    const keys = Object.keys(GROEPEN)
+      .filter(k => GROEPEN[k].categorie === selectedCategory)
+      .filter(k => !slotIsHidden(k));
+
+    if (!keys.length) {
+      wrap.innerHTML = '<div class="msf-info-box">Voor deze doelgroep zijn op dit moment geen lesgroepen beschikbaar. '
+        + 'Neem contact op via <a href="mailto:' + NIVEAUTOETS_EMAIL + '" style="color:#2d3a4a;font-weight:600">' + NIVEAUTOETS_EMAIL + '</a>.</div>';
+      return;
+    }
+
+    let html = '<div class="msf-info-box">Kies het niveau dat bij je past. De lesdag en lestijd horen vast bij het gekozen niveau.</div>'
+             + '<div class="msf-radio-group">';
+
+    keys.forEach(key => {
+      const g       = GROEPEN[key];
+      const titel   = NIVEAU_TITEL[g.niveau] || g.niveau;
+      const omschr  = NIVEAU_OMSCHRIJVING[g.niveau] || '';
+      const moment  = g.dag + ' ' + g.tijd;
+      const bezet   = roosterCounts ? (roosterCounts[key] ?? 0) : 0;
+      const vol     = roosterCounts ? bezet >= capForKey(key) : false;
+
+      if (g.toets) {
+        // Niveau 5: lesmoment tonen, maar niet direct inschrijven — eerst niveautoets.
+        html += '<div class="msf-radio-card" style="cursor:default;align-items:flex-start;flex-direction:column;gap:.5rem">'
+              +   '<div class="msf-radio-card-text">'
+              +     '<strong>' + titel + '</strong>'
+              +     '<span><strong>' + moment + '</strong> — ' + omschr + '</span>'
+              +   '</div>'
+              +   '<a href="mailto:' + NIVEAUTOETS_EMAIL + '?subject=' + encodeURIComponent('Aanmelding niveautoets — ' + titel) + '" '
+              +      'style="display:inline-block;background:#2d3a4a;color:#fff;text-decoration:none;font-size:.75rem;font-weight:700;'
+              +      'letter-spacing:.05em;text-transform:uppercase;padding:.55rem 1.1rem;border-radius:50px">Niveautoets aanvragen</a>'
+              + '</div>';
+        return;
+      }
+
+      if (!slotIsSelectable(key)) {
+        // Inschrijving voor deze groep is gesloten: wel tonen (met dag en tijd), niet kiesbaar.
+        html += '<div class="msf-radio-card" style="cursor:default;opacity:.55">'
+              +   '<div class="msf-radio-card-text">'
+              +     '<strong>' + titel + ' <span class="vol-badge">Gesloten</span></strong>'
+              +     '<span><strong>' + moment + '</strong> — ' + omschr + '</span>'
+              +   '</div>'
+              + '</div>';
+        return;
+      }
+
+      html += '<label class="msf-radio-card">'
+            +   '<input type="radio" name="groep" value="' + key + '"' + (vol ? ' disabled' : '') + '>'
+            +   '<div class="msf-radio-card-text">'
+            +     '<strong>' + titel + (vol ? ' <span class="vol-badge">Vol</span>' : '') + '</strong>'
+            +     '<span><strong>' + moment + '</strong> — ' + omschr + '</span>'
+            +   '</div>'
+            + '</label>';
+    });
+
+    wrap.innerHTML = html + '</div>';
+
+    wrap.querySelectorAll('input[name="groep"]').forEach(radio => {
+      radio.addEventListener('change', function () {
+        wrap.querySelectorAll('.msf-radio-card').forEach(c => c.classList.remove('selected'));
+        this.closest('.msf-radio-card').classList.add('selected');
+        document.getElementById('error-stap3').style.display = 'none';
+      });
+    });
+  }
+
+  // ── Prijzen kinderen (Onderwijsreglement v1.0) ──
   const PRIJS_EERSTE_KIND  = 30;    // € per maand, eerste kind
   const PRIJS_VOLGEND_KIND = 27.5;  // € per maand, ieder volgend kind uit hetzelfde gezin
-  const REGLEMENT_URL      = 'https://www.vereniging-arrahma.nl/wp-content/uploads/2026/07/Onderwijsreglement-Vereniging-Arrahma-versie-1.0.pdf';
-  ['reglementLinkSingle', 'reglementLinkBulk'].forEach(id => {
-    const el = document.getElementById(id);
-    if (el) el.href = REGLEMENT_URL;
-  });
+
+  // ── Prijzen jongeren & volwassenen ──
+  const PRIJS_JONGEREN_VOLWASSENEN = 20;   // € per maand
+  // AANNAME: jaarbedrag afgeleid via dezelfde regel als bij kinderen (ca. 10 lesmaanden:
+  // 30×10=300 en 27,50×10=275). Controleer dit tegen het reglement jongeren & volwassenen.
+  const PRIJS_JAAR_JONGEREN_VOLWASSENEN = 200;
+  const REGLEMENT_URL_KINDEREN = 'https://www.vereniging-arrahma.nl/wp-content/uploads/2026/07/Onderwijsreglement-Vereniging-Arrahma-versie-1.0.pdf';
+
+  const REGLEMENT_URL_JONGEREN_VOLWASSENEN = 'https://www.vereniging-arrahma.nl/wp-content/uploads/2026/08/Onderwijsreglement-jongeren-volwassenen-Vereniging-Arrahma-versie-1.0.pdf';
+
+  function reglementUrlVoor(categorie) {
+    return categorie === 'kinderen' ? REGLEMENT_URL_KINDEREN : REGLEMENT_URL_JONGEREN_VOLWASSENEN;
+  }
+
+  // Bulkmodus is uitsluitend voor kinderen, dus die link staat vast.
+  (function () {
+    const bulkLink = document.getElementById('reglementLinkBulk');
+    if (bulkLink) bulkLink.href = REGLEMENT_URL_KINDEREN;
+  })();
 
   // ── Bulk (meerdere kinderen) state ──
   const BULK_PANELS    = ['step1', 'bstep2', 'bstep3', 'bstep4'];
@@ -953,6 +1110,8 @@ Zorg dat de plugin "Arrahma Inschrijvingen" geactiveerd is in WordPress → Plug
 
   // ── Prijs voor stap 5 (single mode): afhankelijk van 'volgend kind' toggle ──
   function getLessonPrice() {
+    // Gezinskorting geldt alleen bij kinderen; jongeren & volwassenen hebben één vast tarief.
+    if (selectedCategory !== 'kinderen') return PRIJS_JONGEREN_VOLWASSENEN;
     const volgendKind = document.getElementById('volgend_kind')?.checked;
     return volgendKind ? PRIJS_VOLGEND_KIND : PRIJS_EERSTE_KIND;
   }
@@ -963,6 +1122,12 @@ Zorg dat de plugin "Arrahma Inschrijvingen" geactiveerd is in WordPress → Plug
 
   // ── Prijs- en betaalwijze-weergave (single mode, stap 5) ──
   function updateSinglePrice() {
+    const isKind = selectedCategory === 'kinderen';
+
+    // Laatste stap is categorie-afhankelijk: eigen bedragen (zie getLessonPrice) én eigen reglement.
+    const regLink = document.getElementById('reglementLinkSingle');
+    if (regLink) regLink.href = reglementUrlVoor(selectedCategory);
+
     // De gezinskorting ('volgend kind') geldt alleen voor de categorie 'Kinderen'
     const volgendKindRow = document.getElementById('volgendKindRow');
     const volgendKindCb  = document.getElementById('volgend_kind');
@@ -977,7 +1142,9 @@ Zorg dat de plugin "Arrahma Inschrijvingen" geactiveerd is in WordPress → Plug
     }
 
     const maand   = getLessonPrice();
-    const jaar    = maand === PRIJS_VOLGEND_KIND ? 275 : 300;
+    const jaar    = selectedCategory !== 'kinderen'
+                      ? PRIJS_JAAR_JONGEREN_VOLWASSENEN
+                      : ( maand === PRIJS_VOLGEND_KIND ? 275 : 300 );
     const cadence = document.querySelector('input[name="betaalwijze"]:checked')?.value;
 
     const maandEl  = document.getElementById('les-prijs-maand');
@@ -1000,9 +1167,33 @@ Zorg dat de plugin "Arrahma Inschrijvingen" geactiveerd is in WordPress → Plug
       });
       this.closest('.msf-radio-card').classList.add('selected');
       document.getElementById('error-stap1').style.display = 'none';
-      if (selectedCategory === 'kinderen') fetchRoosterCounts();
+
+      // Capaciteit is voor alle doelgroepen relevant (lesblokken én lesgroepen).
+      fetchRoosterCounts().then(() => {
+        if (selectedCategory !== 'kinderen') renderGroepen();
+      });
+
+      applyCategoryToStep3();
     });
   });
+
+  /** Stap 3 toont niveaus (kinderen) óf lesgroepen (jongeren & volwassenen). */
+  function applyCategoryToStep3() {
+    const isKind = selectedCategory === 'kinderen';
+    document.getElementById('niveauKinderen').style.display = isKind ? 'block' : 'none';
+    document.getElementById('niveauGroepen').style.display  = isKind ? 'none'  : 'block';
+
+    document.getElementById('step3Title').textContent = isKind ? 'Indicatie niveau' : 'Niveau & lesmoment';
+    document.getElementById('step3Sub').textContent   = isKind
+      ? 'Geef een indicatie van het huidige niveau.'
+      : 'Kies het niveau dat bij je past — de lesdag en lestijd horen daar vast bij.';
+
+    document.getElementById('error-stap3').textContent = isKind
+      ? 'Kies een niveau om verder te gaan.'
+      : 'Kies een lesgroep om verder te gaan.';
+
+    if (!isKind) renderGroepen();
+  }
 
   // ── Stap 3: niveau radio cards ──
   document.querySelectorAll('input[name="niveau"]').forEach(radio => {
@@ -1124,20 +1315,31 @@ Zorg dat de plugin "Arrahma Inschrijvingen" geactiveerd is in WordPress → Plug
     if (!roosterCounts) return;
 
     document.querySelectorAll('input[name="rooster"]').forEach(radio => {
-      const full = (roosterCounts[radio.value] ?? 0) >= ROOSTER_CAP;
-      radio.disabled = full;
-      if (full && radio.checked) { radio.checked = false; radio.closest('.msf-radio-card').classList.remove('selected'); }
+      const key    = radio.value;
+      const card   = radio.closest('.msf-radio-card');
+      const dicht  = !slotIsSelectable(key);              // gesloten of verborgen
+      const full   = (roosterCounts[key] ?? 0) >= capForKey(key);
 
-      const strongEl = radio.closest('.msf-radio-card').querySelector('.msf-radio-card-text strong');
+      // 'verborgen': lesblok helemaal niet tonen.
+      card.style.display = slotIsHidden(key) ? 'none' : '';
+
+      radio.disabled = full || dicht;
+      if (radio.disabled && radio.checked) { radio.checked = false; card.classList.remove('selected'); }
+      card.style.opacity = dicht ? '.55' : '';
+
+      const strongEl = card.querySelector('.msf-radio-card-text strong');
       let badge = strongEl.querySelector('.vol-badge');
-      if (full && !badge) {
+      const label = dicht ? 'Gesloten' : (full ? 'Vol' : null);
+
+      if (label && !badge) {
         badge = document.createElement('span');
         badge.className = 'vol-badge';
-        badge.textContent = 'Vol';
         strongEl.appendChild(badge);
-      } else if (!full && badge) {
+      } else if (!label && badge) {
         badge.remove();
+        badge = null;
       }
+      if (badge) badge.textContent = label;
     });
 
     document.querySelectorAll('select[data-field="rooster"]').forEach(sel => {
@@ -1222,13 +1424,14 @@ Zorg dat de plugin "Arrahma Inschrijvingen" geactiveerd is in WordPress → Plug
     goToStep(2);
   }
 
-  // De Lesdagen-stap (4) is alleen relevant voor de categorie 'kinderen'
-  function step3Next() {
-    goToStep(selectedCategory === 'kinderen' ? 4 : 5);
+  // Stappen: 1 Voor wie → 2 Niveau/lesmoment → 3 Lesdagen (alleen kinderen) → 4 Gegevens → 5 Akkoord.
+  // Bij jongeren & volwassenen zit het lesmoment al in de groepskeuze van stap 2, dus stap 3 vervalt.
+  function niveauNext() {
+    goToStep(selectedCategory === 'kinderen' ? 3 : 4);
   }
 
-  function step5Back() {
-    goToStep(selectedCategory === 'kinderen' ? 4 : 3);
+  function gegevensBack() {
+    goToStep(selectedCategory === 'kinderen' ? 3 : 2);
   }
 
   // ── Child card template ──
@@ -1540,7 +1743,8 @@ Zorg dat de plugin "Arrahma Inschrijvingen" geactiveerd is in WordPress → Plug
       return true;
     }
 
-    if (step === 2) {
+    // Stap 4 = gegevens ingeschrevene (staat nu ná de niveau-/lesdagenkeuze)
+    if (step === 4) {
       // Always required
       const required = ['voornaam', 'achternaam', 'geboortedatum', 'email', 'adres', 'postcode', 'woonplaats'];
 
@@ -1623,15 +1827,22 @@ Zorg dat de plugin "Arrahma Inschrijvingen" geactiveerd is in WordPress → Plug
       return valid;
     }
 
-    if (step === 3) {
-      if (!document.querySelector('input[name="niveau"]:checked')) {
+    // Stap 2 = niveau/lesmoment. (De ids error-stap3/4 zijn historisch en verwijzen naar
+    // het niveau- respectievelijk lesdagenpaneel; alleen de stapnummers zijn gewijzigd.)
+    if (step === 2) {
+      // Kinderen kiezen een niveau; jongeren & volwassenen kiezen een lesgroep (niveau + lesmoment).
+      const sel = selectedCategory === 'kinderen'
+        ? document.querySelector('input[name="niveau"]:checked')
+        : document.querySelector('input[name="groep"]:checked');
+      if (!sel) {
         document.getElementById('error-stap3').style.display = 'block';
         return false;
       }
       return true;
     }
 
-    if (step === 4) {
+    // Stap 3 = lesdagen (alleen kinderen)
+    if (step === 3) {
       if (!document.querySelector('input[name="rooster"]:checked')) {
         document.getElementById('error-stap4').style.display = 'block';
         return false;
@@ -1695,8 +1906,13 @@ Zorg dat de plugin "Arrahma Inschrijvingen" geactiveerd is in WordPress → Plug
       adres                : document.getElementById('adres').value,
       postcode             : document.getElementById('postcode').value,
       woonplaats           : document.getElementById('woonplaats').value,
-      niveau               : document.querySelector('input[name="niveau"]:checked')?.value,
-      rooster              : document.querySelector('input[name="rooster"]:checked')?.value,
+      // Kinderen: losse niveau- en lesdagenkeuze. Overige doelgroepen: één lesgroep levert beide.
+      niveau               : selectedCategory === 'kinderen'
+                               ? document.querySelector('input[name="niveau"]:checked')?.value
+                               : (GROEPEN[getSelectedGroepKey()] || {}).niveau,
+      rooster              : selectedCategory === 'kinderen'
+                               ? document.querySelector('input[name="rooster"]:checked')?.value
+                               : getSelectedGroepKey(),
       rekeningnummer       : rek.value,
       naam_rekeninghouder  : naamRek.value,
       betaalwijze          : betaalwijze,
@@ -1726,13 +1942,19 @@ Zorg dat de plugin "Arrahma Inschrijvingen" geactiveerd is in WordPress → Plug
 
         const body = await res.json().catch(() => null);
         if (body && body.code === 'rooster_full') {
-          const staleRadio = document.querySelector('input[name="rooster"]:checked');
+          // Kinderen kozen een lesdag (stap 3); overige doelgroepen kozen een lesgroep (stap 2).
+          const isKind     = selectedCategory === 'kinderen';
+          const staleRadio = document.querySelector('input[name="' + (isKind ? 'rooster' : 'groep') + '"]:checked');
           if (staleRadio) { staleRadio.checked = false; staleRadio.closest('.msf-radio-card').classList.remove('selected'); }
+
           roosterCounts = null;
           roosterCountsPromise = null;
-          fetchRoosterCounts();
-          goToStep(4);
-          alert('Dit lesdagen-tijdslot is helaas net vol geraakt. Kies een ander tijdslot.');
+          fetchRoosterCounts().then(() => { if (!isKind) renderGroepen(); });
+
+          goToStep(isKind ? 3 : 2);
+          alert(isKind
+            ? 'Dit lesdagen-tijdslot is helaas net vol geraakt. Kies een ander tijdslot.'
+            : 'Deze lesgroep is helaas net vol geraakt. Kies een andere groep.');
         } else {
           alert('Er is iets misgegaan. Probeer het opnieuw of neem contact met ons op.');
         }
@@ -1836,6 +2058,7 @@ Zorg dat de plugin "Arrahma Inschrijvingen" geactiveerd is in WordPress → Plug
     fetch(FORM_MODE_ENDPOINT)
       .then(res => res.ok ? res.json() : null)
       .then(data => {
+        if (data && data.slots) slotStatus = data.slots;
         if (data && data.open === false) showClosedMessage(data.message);
         else showSignupForm();
       })

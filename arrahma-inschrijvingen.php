@@ -9,12 +9,19 @@
 if ( ! defined( 'ABSPATH' ) ) exit;
 
 define( 'ARRAHMA_TABLE',       'arrahma_inschrijvingen' );
-define( 'ARRAHMA_VERSION',     '1.8.0' );
+define( 'ARRAHMA_VERSION',     '1.9.0' );
 define( 'ARRAHMA_ROOSTER_CAP', 30 ); // max. aantal inschrijvingen per lesdagen-tijdslot (categorie 'kinderen')
+
+// TODO: PLACEHOLDER — definitieve groepsgrootte voor jongeren & volwassenen nog navragen.
+// Deze waarde moet gelijk zijn aan GROEP_CAP in index.html.
+define( 'ARRAHMA_GROEP_CAP',   20 );
 
 // Staan inschrijvingen open? 'open' toont het formulier, 'gesloten' toont een bericht.
 define( 'ARRAHMA_FORM_MODE_OPTION',      'arrahma_form_mode' );
 define( 'ARRAHMA_CLOSED_MESSAGE_OPTION', 'arrahma_closed_message' );
+
+// Status per lesblok/lesgroep: 'open' | 'gesloten' (zichtbaar, niet kiesbaar) | 'verborgen'.
+define( 'ARRAHMA_SLOT_STATUS_OPTION',    'arrahma_slot_status' );
 
 // Ouderavond-uitnodiging: prefill-doelvelden op het Google Form (zie docs/wayfinder/tickets/parent-meeting-emails/01-create-google-form.md)
 define( 'ARRAHMA_OUDERAVOND_FORM_ID',     '1FAIpQLSflfMJHypxN8eccuTc5ScD-UWaqzG941QJ2rvTKD-iK5l-q2g' );
@@ -74,32 +81,110 @@ add_action( 'plugins_loaded', function () {
 // ─────────────────────────────────────────────────────────────
 // HELPERS
 // ─────────────────────────────────────────────────────────────
+/**
+ * Alle categorieën, inclusief oude waarden zodat bestaande inschrijvingen leesbaar blijven.
+ * Alleen de categorieën uit arrahma_active_categories() staan nog op het formulier.
+ */
 function arrahma_category_labels(): array {
     return [
-        'kinderen'         => 'Kinderen (6–11)',
+        'kinderen'             => 'Kinderen (6–11)',
+        'broeders_jongeren'    => 'Broeders — jongeren (12–16)',
+        'broeders_volwassenen' => 'Broeders — volwassenen (17+)',
+        'zusters_jongeren'     => 'Zusters — jongeren (12–16)',
+        'zusters_volwassenen'  => 'Zusters — volwassenen (17+)',
+
+        // ── Oud (niet meer op het formulier, blijven bestaan voor reeds opgeslagen inschrijvingen)
         'tieners_broeders' => 'Tieners — Broeders (12–17)',
         'tieners_zusters'  => 'Tieners — Zusters (12–17)',
-        'zusters_18plus'   => 'Zusters 18+',
         'broeders_18plus'  => 'Broeders 18+',
+        'zusters_18plus'   => 'Zusters 18+',
     ];
+}
+
+/** Categorieën die het formulier daadwerkelijk aanbiedt. */
+function arrahma_active_categories(): array {
+    return [ 'kinderen', 'broeders_jongeren', 'broeders_volwassenen', 'zusters_jongeren', 'zusters_volwassenen' ];
 }
 
 function arrahma_niveau_labels(): array {
     return [
+        // ── Kinderen (Onderwijsreglement v1.0)
         'instroom'  => 'Instroomniveau',
         'basis'     => 'Basisniveau',
         'gevorderd' => 'Gevorderd niveau',
+
+        // ── Broeders jongeren & volwassenen (briefing 2026–2027)
+        'n1' => 'Niveau 1 — Alif Baa | Basis',
+        'n2' => 'Niveau 2 — Letters herkennen & leesvaardigheid',
+        'n3' => 'Niveau 3 — Lezen & basisgrammatica',
+        'n4' => 'Niveau 4 — Grammatica toepassen & tekstverwerking',
+        'n5' => 'Niveau 5 — al-Ājurrūmiyyah',
+
+        // ── Zusters jongeren & volwassenen
+        'z_basis'     => 'Basis — Alif Baa',
+        'z_gevorderd' => 'Gevorderd Arabisch',
     ];
 }
 
-function arrahma_roster_labels(): array {
+/**
+ * Lesgroepen voor jongeren & volwassenen. Elke groep koppelt categorie + niveau aan één vast
+ * lesmoment, dus de deelnemer kiest niveau en lesmoment in één keer.
+ *
+ * 'toets' => true betekent: geen directe inschrijving, eerst een niveautoets aanvragen.
+ *
+ * UITBREIDEN: hier een regel toevoegen is genoeg — formulier, capaciteit, admin en CSV volgen mee.
+ * Nog toe te voegen zodra bekend: een beginnersgroep (Niveau 1) voor broeders jongeren 12–16.
+ */
+function arrahma_groepen(): array {
     return [
+        // ── Broeders
+        'br_volw_n1_zo' => [ 'categorie' => 'broeders_volwassenen', 'niveau' => 'n1', 'dag' => 'Zondag',   'tijd' => '09:30–11:00' ],
+        'br_volw_n2_zo' => [ 'categorie' => 'broeders_volwassenen', 'niveau' => 'n2', 'dag' => 'Zondag',   'tijd' => '11:00–12:30' ],
+        'br_volw_n3_za' => [ 'categorie' => 'broeders_volwassenen', 'niveau' => 'n3', 'dag' => 'Zaterdag', 'tijd' => '09:30–11:00' ],
+        'br_volw_n4_zo' => [ 'categorie' => 'broeders_volwassenen', 'niveau' => 'n4', 'dag' => 'Zondag',   'tijd' => '09:30–11:00' ],
+        'br_jong_n1_zo' => [ 'categorie' => 'broeders_jongeren',    'niveau' => 'n1', 'dag' => 'Zondag',   'tijd' => '11:00–12:30' ],
+        'br_jong_n2_zo' => [ 'categorie' => 'broeders_jongeren',    'niveau' => 'n2', 'dag' => 'Zondag',   'tijd' => '11:00–12:30' ],
+        'br_jong_n3_za' => [ 'categorie' => 'broeders_jongeren',    'niveau' => 'n3', 'dag' => 'Zaterdag', 'tijd' => '11:30–13:00' ],
+
+        // Niveau 5: dag en tijd zijn bekend, maar inschrijven kan pas na de niveautoets.
+        'br_volw_n5_zo' => [ 'categorie' => 'broeders_volwassenen', 'niveau' => 'n5', 'dag' => 'Zondag', 'tijd' => '19:00', 'toets' => true ],
+        'br_jong_n5_zo' => [ 'categorie' => 'broeders_jongeren',    'niveau' => 'n5', 'dag' => 'Zondag', 'tijd' => '19:00', 'toets' => true ],
+
+        // ── Zusters
+        'zu_volw_basis_ma' => [ 'categorie' => 'zusters_volwassenen', 'niveau' => 'z_basis',     'dag' => 'Maandag',   'tijd' => '19:00–20:30' ],
+        'zu_volw_gev_do'   => [ 'categorie' => 'zusters_volwassenen', 'niveau' => 'z_gevorderd', 'dag' => 'Donderdag', 'tijd' => '19:00–20:30' ],
+        'zu_jong_basis_wo' => [ 'categorie' => 'zusters_jongeren',    'niveau' => 'z_basis',     'dag' => 'Woensdag',  'tijd' => '18:00–19:30' ],
+        'zu_jong_gev_wo'   => [ 'categorie' => 'zusters_jongeren',    'niveau' => 'z_gevorderd', 'dag' => 'Woensdag',  'tijd' => '18:00–19:30' ],
+    ];
+}
+
+/** Leesbare omschrijving van één lesgroep, bijv. "Zondag 09:30–11:00 — Niveau 1 — Alif Baa | Basis". */
+function arrahma_groep_label( string $key ): string {
+    $g = arrahma_groepen()[ $key ] ?? null;
+    if ( ! $g ) return '';
+    return $g['dag'] . ' ' . $g['tijd'] . ' — ' . arrahma_niveau_label( $g['niveau'] );
+}
+
+/** Vaste lesblokken (kinderen) plus alle lesgroepen (jongeren & volwassenen). */
+function arrahma_roster_labels(): array {
+    $labels = [
         'za_zo_blok1' => 'Zaterdag & zondag — 09:00–11:00 (blok 1)',
         'za_zo_blok2' => 'Zaterdag & zondag — 11:15–13:15 (blok 2)',
         'za_zo_blok3' => 'Zaterdag & zondag — 13:30–15:30 (blok 3)',
         'ma_wo'       => 'Maandag & woensdag — 15:30–17:30',
         'di_do'       => 'Dinsdag & donderdag — 15:30–17:30',
     ];
+
+    foreach ( array_keys( arrahma_groepen() ) as $key ) {
+        $labels[ $key ] = arrahma_groep_label( $key );
+    }
+
+    return $labels;
+}
+
+/** Maximum aantal deelnemers voor een lesblok of lesgroep. */
+function arrahma_cap_for( string $key ): int {
+    return isset( arrahma_groepen()[ $key ] ) ? ARRAHMA_GROEP_CAP : ARRAHMA_ROOSTER_CAP;
 }
 
 /** Human-readable niveau label, with graceful fallback for legacy values. */
@@ -124,6 +209,32 @@ function arrahma_form_is_open(): bool {
 function arrahma_closed_message(): string {
     $msg = trim( (string) get_option( ARRAHMA_CLOSED_MESSAGE_OPTION, '' ) );
     return $msg !== '' ? $msg : ARRAHMA_CLOSED_MESSAGE_DEFAULT;
+}
+
+/** Mogelijke statussen per lesblok/lesgroep. */
+function arrahma_slot_status_labels(): array {
+    return [
+        'open'      => 'Open — kan gekozen worden',
+        'gesloten'  => 'Gesloten — wel zichtbaar, niet kiesbaar',
+        'verborgen' => 'Verborgen — helemaal niet tonen',
+    ];
+}
+
+/** Status van alle lesblokken en lesgroepen; ontbrekende sleutels zijn 'open'. */
+function arrahma_slot_statuses(): array {
+    $opgeslagen = get_option( ARRAHMA_SLOT_STATUS_OPTION, [] );
+    if ( ! is_array( $opgeslagen ) ) $opgeslagen = [];
+
+    $statuses = [];
+    foreach ( array_keys( arrahma_roster_labels() ) as $key ) {
+        $waarde = $opgeslagen[ $key ] ?? 'open';
+        $statuses[ $key ] = isset( arrahma_slot_status_labels()[ $waarde ] ) ? $waarde : 'open';
+    }
+    return $statuses;
+}
+
+function arrahma_slot_status_for( string $key ): string {
+    return arrahma_slot_statuses()[ $key ] ?? 'open';
 }
 
 function arrahma_betaalwijze_labels(): array {
@@ -152,8 +263,12 @@ function email_to_send_to(string $category): string {
     case 'tieners_zusters':
       return 'oudercomite@vereniging-arrahma.nl';
     case 'broeders_18plus':
+    case 'broeders_jongeren':
+    case 'broeders_volwassenen':
       return 'lessen@vereniging-arrahma.nl';
     case 'zusters_18plus':
+    case 'zusters_jongeren':
+    case 'zusters_volwassenen':
       return 'zusters@vereniging-arrahma.nl';
     default:
       return 'lessen@vereniging-arrahma.nl';
@@ -188,6 +303,7 @@ function arrahma_get_form_mode() {
     return rest_ensure_response( [
         'open'    => arrahma_form_is_open(),
         'message' => arrahma_closed_message(),
+        'slots'   => arrahma_slot_statuses(),
     ] );
 }
 
@@ -284,11 +400,19 @@ function arrahma_handle_submission( WP_REST_Request $request ) {
     $table = $wpdb->prefix . ARRAHMA_TABLE;
 
     // ── Capaciteitscontrole (race-conditie: iemand anders kan het tijdslot inmiddels hebben volgemaakt)
-    if ( $voor === 'kinderen' && $insert['rooster'] !== '' ) {
+    // ── Is dit lesblok/lesgroep überhaupt open voor inschrijving?
+    if ( $insert['rooster'] !== '' && arrahma_slot_status_for( $insert['rooster'] ) !== 'open' ) {
+        return new WP_Error( 'slot_closed', 'Voor deze groep is de inschrijving gesloten. Kies een andere groep.', [
+            'status'  => 409,
+            'rooster' => $insert['rooster'],
+        ] );
+    }
+
+    if ( $insert['rooster'] !== '' ) {
         $huidig = (int) $wpdb->get_var( $wpdb->prepare(
             "SELECT COUNT(*) FROM {$table} WHERE rooster = %s", $insert['rooster']
         ) );
-        if ( $huidig >= ARRAHMA_ROOSTER_CAP ) {
+        if ( $huidig >= arrahma_cap_for( $insert['rooster'] ) ) {
             return new WP_Error( 'rooster_full', 'Dit lesdagen-tijdslot is helaas net vol geraakt. Kies een ander tijdslot.', [
                 'status'  => 409,
                 'rooster' => $insert['rooster'],
@@ -364,7 +488,7 @@ function arrahma_handle_bulk_submission( array $data ) {
         $huidig = (int) $wpdb->get_var( $wpdb->prepare(
             "SELECT COUNT(*) FROM {$table} WHERE rooster = %s", $rooster_waarde
         ) );
-        if ( $huidig + $aantal_gevraagd > ARRAHMA_ROOSTER_CAP ) {
+        if ( $huidig + $aantal_gevraagd > arrahma_cap_for( $rooster_waarde ) ) {
             return new WP_Error( 'rooster_full', 'Eén of meer gekozen lesdagen-tijdsloten zijn helaas net vol geraakt. Kies een ander tijdslot.', [
                 'status'  => 409,
                 'rooster' => $rooster_waarde,
@@ -979,11 +1103,12 @@ function arrahma_render_edit_form( int $id ) {
         // ── Capaciteitscontrole: de rij zelf telt niet mee tegen zijn eigen tijdslot
         if ( empty( $errors ) && $values['rooster'] !== '' ) {
             $bezet = arrahma_rooster_count( $values['rooster'], $id );
-            if ( $bezet >= ARRAHMA_ROOSTER_CAP ) {
+            $cap   = arrahma_cap_for( $values['rooster'] );
+            if ( $bezet >= $cap ) {
                 $errors[] = sprintf(
                     'Dit tijdslot zit vol (%d/%d) — %s. Kies een ander tijdslot.',
                     $bezet,
-                    ARRAHMA_ROOSTER_CAP,
+                    $cap,
                     arrahma_roster_label( $values['rooster'] )
                 );
             }
@@ -1074,16 +1199,17 @@ function arrahma_render_edit_form( int $id ) {
                     $bezet_excl = arrahma_rooster_count( $val, $id );
                     $is_huidig  = ( $values['rooster'] === $val );
                     $bezet_disp = $bezet_excl + ( $is_huidig ? 1 : 0 );
-                    $vol        = $bezet_excl >= ARRAHMA_ROOSTER_CAP;
+                    $cap_val    = arrahma_cap_for( $val );
+                    $vol        = $bezet_excl >= $cap_val;
                 ?>
                   <option value="<?= esc_attr( $val ) ?>"
                           <?= selected( $values['rooster'], $val, false ) ?>
                           <?= ( $vol && ! $is_huidig ) ? 'disabled' : '' ?>>
-                    <?= esc_html( $label ) ?> — <?= (int) $bezet_disp ?>/<?= (int) ARRAHMA_ROOSTER_CAP ?><?= $vol && ! $is_huidig ? ' (vol)' : '' ?>
+                    <?= esc_html( $label ) ?> — <?= (int) $bezet_disp ?>/<?= (int) $cap_val ?><?= $vol && ! $is_huidig ? ' (vol)' : '' ?>
                   </option>
                 <?php endforeach; ?>
               </select>
-              <p class="description">Volle tijdsloten (<?= (int) ARRAHMA_ROOSTER_CAP ?> leerlingen) kunnen niet gekozen worden.</p>
+              <p class="description">Volle tijdsloten kunnen niet gekozen worden (kinderen <?= (int) ARRAHMA_ROOSTER_CAP ?>, overige groepen <?= (int) ARRAHMA_GROEP_CAP ?>).</p>
             </td>
           </tr>
           <tr>
@@ -1634,11 +1760,22 @@ function arrahma_settings_page() {
             ARRAHMA_CLOSED_MESSAGE_OPTION,
             sanitize_textarea_field( wp_unslash( $_POST['closed_message'] ?? '' ) )
         );
+
+        // ── Status per lesblok/lesgroep; alleen bekende sleutels en statussen worden bewaard.
+        $ingestuurd = (array) ( $_POST['slot_status'] ?? [] );
+        $nieuw      = [];
+        foreach ( array_keys( arrahma_roster_labels() ) as $key ) {
+            $waarde = sanitize_text_field( wp_unslash( $ingestuurd[ $key ] ?? 'open' ) );
+            $nieuw[ $key ] = isset( arrahma_slot_status_labels()[ $waarde ] ) ? $waarde : 'open';
+        }
+        update_option( ARRAHMA_SLOT_STATUS_OPTION, $nieuw );
+
         $notice = 'Instellingen opgeslagen.';
     }
 
-    $is_open = arrahma_form_is_open();
-    $message = arrahma_closed_message();
+    $is_open       = arrahma_form_is_open();
+    $message       = arrahma_closed_message();
+    $slot_statuses = arrahma_slot_statuses();
     ?>
     <div class="wrap">
       <h1 style="display:flex;align-items:center;gap:.5rem">
@@ -1685,6 +1822,51 @@ function arrahma_settings_page() {
           <h2 style="font-size:.8rem;text-transform:uppercase;letter-spacing:.08em;color:#2d3a4a;margin:0 0 1rem">Bericht bij gesloten inschrijvingen</h2>
           <textarea name="closed_message" rows="4" class="large-text"><?= esc_textarea( $message ) ?></textarea>
           <p class="description">Laat leeg om de standaardtekst te gebruiken.</p>
+        </div>
+
+        <div style="background:#fff;border:1px solid #e0e0e0;border-radius:10px;padding:1.25rem 1.5rem;max-width:860px;margin-top:1.25rem">
+          <h2 style="font-size:.8rem;text-transform:uppercase;letter-spacing:.08em;color:#2d3a4a;margin:0 0 .5rem">Lesblokken &amp; lesgroepen</h2>
+          <p style="color:#888;font-size:.85rem;margin:0 0 1rem">
+            Per groep instelbaar. <strong>Gesloten</strong> laat de groep wél zien (met dag en tijd) maar maakt hem niet kiesbaar —
+            handig als één groep vol of gepauzeerd is terwijl de rest gewoon open blijft. <strong>Verborgen</strong> haalt de groep helemaal van het formulier.
+            De site-brede schakelaar hierboven gaat vóór deze instellingen.
+          </p>
+
+          <table class="wp-list-table widefat striped" style="border-radius:8px;overflow:hidden">
+            <thead>
+              <tr>
+                <th>Lesblok / lesgroep</th>
+                <th style="width:110px">Ingeschreven</th>
+                <th style="width:260px">Status</th>
+              </tr>
+            </thead>
+            <tbody>
+            <?php
+              $groepen  = arrahma_groepen();
+              $vorig_ct = null;
+              foreach ( arrahma_roster_labels() as $key => $label ) :
+                  $is_groep = isset( $groepen[ $key ] );
+                  $kop      = $is_groep ? ( arrahma_category_labels()[ $groepen[ $key ]['categorie'] ] ?? '' ) : 'Kinderen — lesblokken';
+                  $bezet    = arrahma_rooster_count( $key );
+                  $cap      = arrahma_cap_for( $key );
+                  if ( $kop !== $vorig_ct ) :
+                      $vorig_ct = $kop; ?>
+                      <tr><th colspan="3" style="background:#f4f6f8;font-size:.78rem;text-transform:uppercase;letter-spacing:.06em;color:#2d3a4a"><?= esc_html( $kop ) ?></th></tr>
+                  <?php endif; ?>
+                  <tr>
+                    <td><?= esc_html( $label ) ?></td>
+                    <td><?= (int) $bezet ?> / <?= (int) $cap ?></td>
+                    <td>
+                      <select name="slot_status[<?= esc_attr( $key ) ?>]" style="width:100%">
+                        <?php foreach ( arrahma_slot_status_labels() as $val => $slabel ) : ?>
+                          <option value="<?= esc_attr( $val ) ?>" <?= selected( $slot_statuses[ $key ] ?? 'open', $val, false ) ?>><?= esc_html( $slabel ) ?></option>
+                        <?php endforeach; ?>
+                      </select>
+                    </td>
+                  </tr>
+            <?php endforeach; ?>
+            </tbody>
+          </table>
         </div>
 
         <p class="submit">
