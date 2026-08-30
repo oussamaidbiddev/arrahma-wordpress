@@ -937,6 +937,9 @@ Zorg dat de plugin "Arrahma Inschrijvingen" geactiveerd is in WordPress → Plug
   const FORM_ENDPOINT           = 'https://www.vereniging-arrahma.nl/wp-json/arrahma/v1/inschrijving';
   const ROOSTER_COUNTS_ENDPOINT = 'https://www.vereniging-arrahma.nl/wp-json/arrahma/v1/rooster-counts';
   const FORM_MODE_ENDPOINT      = 'https://www.vereniging-arrahma.nl/wp-json/arrahma/v1/form-mode';
+
+  // Standaardcapaciteit van een kinderen-lesblok; per lesblok te overschrijven via Instellingen.
+  // Moet gelijk blijven aan ARRAHMA_ROOSTER_CAP in arrahma-inschrijvingen.php.
   const ROOSTER_CAP             = 30;
 
   let currentStep      = 1;
@@ -948,9 +951,12 @@ Zorg dat de plugin "Arrahma Inschrijvingen" geactiveerd is in WordPress → Plug
   let roosterCounts        = null;
   let roosterCountsPromise = null;
 
-  // ── Status per lesblok/lesgroep, ingesteld via Instellingen in de admin ──
-  // 'open' | 'gesloten' (zichtbaar, niet kiesbaar) | 'verborgen'. Onbekend = 'open'.
+  // ── Status en capaciteit per lesblok/lesgroep, ingesteld via Instellingen in de admin ──
+  // status: 'open' | 'gesloten' (zichtbaar, niet kiesbaar) | 'verborgen'. Onbekend = 'open'.
+  // caps:   aantal plaatsen per sleutel. Onbekend = de standaardwaarde hieronder.
+  // Beide komen uit /form-mode, dat wordt opgehaald vóórdat het formulier zichtbaar wordt.
   let slotStatus = {};
+  let slotCaps   = {};
 
   function slotIsHidden(key)     { return slotStatus[key] === 'verborgen'; }
   function slotIsSelectable(key) { return (slotStatus[key] || 'open') === 'open'; }
@@ -959,12 +965,15 @@ Zorg dat de plugin "Arrahma Inschrijvingen" geactiveerd is in WordPress → Plug
   //  LESGROEPEN — jongeren & volwassenen (briefing 2026–2027)
   //  Moet gelijk blijven aan arrahma_groepen() in arrahma-inschrijvingen.php.
   // ══════════════════════════════════════════════════════════
-  // TODO: PLACEHOLDER — definitieve groepsgrootte nog navragen (= ARRAHMA_GROEP_CAP in de plugin).
+  // Standaardgroepsgrootte; per lesgroep te overschrijven via Instellingen.
+  // Moet gelijk blijven aan ARRAHMA_GROEP_CAP in de plugin.
   const GROEP_CAP         = 20;
   const KINDEREN_ROOSTERS = ['za_zo_blok1', 'za_zo_blok2', 'za_zo_blok3', 'ma_wo', 'di_do'];
   const NIVEAUTOETS_EMAIL = 'communicatie@vereniging-arrahma.nl';
 
   function capForKey(key) {
+    const ingesteld = slotCaps[key];
+    if (ingesteld > 0) return ingesteld;
     return KINDEREN_ROOSTERS.includes(key) ? ROOSTER_CAP : GROEP_CAP;
   }
 
@@ -997,8 +1006,8 @@ Zorg dat de plugin "Arrahma Inschrijvingen" geactiveerd is in WordPress → Plug
     br_jong_n1_zo: { categorie: 'broeders_jongeren',    niveau: 'n1', dag: 'Zondag',   tijd: '11:00–12:30' },
     br_jong_n2_zo: { categorie: 'broeders_jongeren',    niveau: 'n2', dag: 'Zondag',   tijd: '11:00–12:30' },
     br_jong_n3_za: { categorie: 'broeders_jongeren',    niveau: 'n3', dag: 'Zaterdag', tijd: '11:30–13:00' },
+    // Niveau 5 is alleen voor volwassen broeders (17+), niet voor jongeren 12–16.
     br_volw_n5_zo: { categorie: 'broeders_volwassenen', niveau: 'n5', dag: 'Zondag', tijd: '19:00', toets: true },
-    br_jong_n5_zo: { categorie: 'broeders_jongeren',    niveau: 'n5', dag: 'Zondag', tijd: '19:00', toets: true },
     zu_volw_basis_ma: { categorie: 'zusters_volwassenen', niveau: 'z_basis',     dag: 'Maandag',   tijd: '19:00–20:30' },
     zu_volw_gev_do:   { categorie: 'zusters_volwassenen', niveau: 'z_gevorderd', dag: 'Donderdag', tijd: '19:00–20:30' },
     zu_jong_basis_wo: { categorie: 'zusters_jongeren',    niveau: 'z_basis',     dag: 'Woensdag',  tijd: '18:00–19:30' },
@@ -1085,8 +1094,8 @@ Zorg dat de plugin "Arrahma Inschrijvingen" geactiveerd is in WordPress → Plug
 
   // ── Prijzen jongeren & volwassenen ──
   const PRIJS_JONGEREN_VOLWASSENEN = 20;   // € per maand
-  // AANNAME: jaarbedrag afgeleid via dezelfde regel als bij kinderen (ca. 10 lesmaanden:
-  // 30×10=300 en 27,50×10=275). Controleer dit tegen het reglement jongeren & volwassenen.
+  // Jaarbedrag = 10 lesmaanden × €20; de zomervakantie telt niet mee. Zelfde regel als
+  // bij kinderen (30×10=300 en 27,50×10=275). Bevestigd 2026-08-30.
   const PRIJS_JAAR_JONGEREN_VOLWASSENEN = 200;
   const REGLEMENT_URL_KINDEREN = 'https://www.vereniging-arrahma.nl/wp-content/uploads/2026/07/Onderwijsreglement-Vereniging-Arrahma-versie-1.0.pdf';
 
@@ -1345,7 +1354,7 @@ Zorg dat de plugin "Arrahma Inschrijvingen" geactiveerd is in WordPress → Plug
     document.querySelectorAll('select[data-field="rooster"]').forEach(sel => {
       Array.from(sel.options).forEach(opt => {
         if (!opt.value) return; // placeholder "Kies lesdagen"
-        const full = (roosterCounts[opt.value] ?? 0) >= ROOSTER_CAP;
+        const full = (roosterCounts[opt.value] ?? 0) >= capForKey(opt.value);
         opt.disabled = full;
         opt.textContent = opt.textContent.replace(/ \(Vol\)$/, '') + (full ? ' (Vol)' : '');
         if ( full && sel.value === opt.value ) sel.value = '';
@@ -2045,10 +2054,17 @@ Zorg dat de plugin "Arrahma Inschrijvingen" geactiveerd is in WordPress → Plug
   }
 
   function showClosedMessage(message) {
-    if (message) {
-      // textContent (geen innerHTML): tekst uit de admin kan geen opmaak injecteren.
-      document.getElementById('formClosedMessage').textContent = message;
-    }
+    const p = document.getElementById('formClosedMessage');
+
+    // textContent (geen innerHTML): tekst uit de admin kan geen opmaak injecteren.
+    // Een lege waarde laat de standaardtekst uit de markup staan.
+    const tekst = (message || '').trim();
+    if (tekst) p.textContent = tekst;
+
+    // display expliciet zetten: een themaregel als `p:empty { display:none }` liet de
+    // paragraaf anders onzichtbaar blijven, ook nadat de tekst was ingevuld.
+    p.style.display = 'block';
+
     document.getElementById('formLoading').style.display = 'none';
     document.getElementById('signupUI').style.display    = 'none';
     document.getElementById('formClosed').style.display  = 'block';
@@ -2059,6 +2075,7 @@ Zorg dat de plugin "Arrahma Inschrijvingen" geactiveerd is in WordPress → Plug
       .then(res => res.ok ? res.json() : null)
       .then(data => {
         if (data && data.slots) slotStatus = data.slots;
+        if (data && data.caps)  slotCaps   = data.caps;
         if (data && data.open === false) showClosedMessage(data.message);
         else showSignupForm();
       })
