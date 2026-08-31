@@ -95,6 +95,12 @@ Zorg dat de plugin "Arrahma Inschrijvingen" geactiveerd is in WordPress → Plug
   .msf-radio-card-text span   { font-size: .8rem; color: #888; }
   .msf-radio-card:has(input:disabled) { opacity: .5; cursor: not-allowed; background: #f7f7f7; }
   .msf-radio-card:has(input:disabled):hover { border-color: #d8d8d8; }
+  /* Vergrendeld door een toegangslink — neutraal grijs, niet het rood van 'Vol'/'Gesloten'. */
+  .lock-badge {
+    display: inline-block; margin-left: .5rem; padding: 1px 8px;
+    background: #ececef; color: #6b7280; font-size: .68rem; font-weight: 700;
+    border-radius: 50px; text-transform: uppercase; letter-spacing: .03em; vertical-align: middle;
+  }
   .vol-badge {
     display: inline-block; margin-left: .5rem; padding: 1px 8px;
     background: #fdeaea; color: #d32f2f; font-size: .68rem; font-weight: 700;
@@ -978,6 +984,34 @@ Zorg dat de plugin "Arrahma Inschrijvingen" geactiveerd is in WordPress → Plug
     }
   })();
 
+  /** Bestaat deze sleutel überhaupt? Voorkomt dat een verzonnen code als 'open' geldt. */
+  function isBekendSlot(key) {
+    return KINDEREN_ROOSTERS.includes(key) || Object.prototype.hasOwnProperty.call(GROEPEN, key);
+  }
+
+  function categorieVanSlot(key) {
+    return KINDEREN_ROOSTERS.includes(key) ? 'kinderen' : (GROEPEN[key] || {}).categorie;
+  }
+
+  /** Lesmomenten die de toegangslink daadwerkelijk ontgrendelt. */
+  function ontgrendeldeSlots() {
+    return toegangsCodes.filter(code => isBekendSlot(code) && slotIsSelectable(code));
+  }
+
+  /**
+   * Zit de bezoeker in toegangslink-modus? Dan gaat alles wat niet in de link staat op slot,
+   * zodat meteen zichtbaar is dat deze link voor één specifieke groep bedoeld is.
+   */
+  function viaToegangslink() { return ontgrendeldeSlots().length > 0; }
+
+  function slotIsToegestaan(key) {
+    return !viaToegangslink() || ontgrendeldeSlots().includes(key);
+  }
+
+  function categorieIsToegestaan(categorie) {
+    return !viaToegangslink() || ontgrendeldeSlots().some(k => categorieVanSlot(k) === categorie);
+  }
+
   /** Effectieve status van een lesblok/lesgroep, met de toegangslink meegewogen. */
   function slotStatusVoor(key) {
     const status = slotStatus[key] || (GROEPEN[key] || {}).standaardStatus || 'open';
@@ -1091,6 +1125,17 @@ Zorg dat de plugin "Arrahma Inschrijvingen" geactiveerd is in WordPress → Plug
         html += '<div class="msf-radio-card" style="cursor:default;opacity:.55">'
               +   '<div class="msf-radio-card-text">'
               +     '<strong>' + titel + ' <span class="vol-badge">Gesloten</span></strong>'
+              +     '<span><strong>' + moment + '</strong> — ' + omschr + '</span>'
+              +   '</div>'
+              + '</div>';
+        return;
+      }
+
+      if (!slotIsToegestaan(key)) {
+        // Deze groep zit niet in de toegangslink: tonen, maar op slot.
+        html += '<div class="msf-radio-card" style="cursor:default;opacity:.55">'
+              +   '<div class="msf-radio-card-text">'
+              +     '<strong>' + titel + ' <span class="lock-badge">Vergrendeld</span></strong>'
               +     '<span><strong>' + moment + '</strong> — ' + omschr + '</span>'
               +   '</div>'
               + '</div>';
@@ -1215,18 +1260,22 @@ Zorg dat de plugin "Arrahma Inschrijvingen" geactiveerd is in WordPress → Plug
     return 'open';
   }
 
-  function zetGeslotenBadge(kaart, tonen) {
+  /** Zet (of verwijdert) het badge op een doelgroepkaart. label: null | 'Gesloten' | 'Vergrendeld'. */
+  function zetKaartBadge(kaart, label) {
     const titel = kaart.querySelector('.msf-radio-card-text strong');
     if (!titel) return;
-    const badge = titel.querySelector('.vol-badge');
-    if (tonen && !badge) {
-      const nieuw = document.createElement('span');
-      nieuw.className   = 'vol-badge';
-      nieuw.textContent = 'Gesloten';
-      titel.appendChild(nieuw);
-    } else if (!tonen && badge) {
-      badge.remove();
+    let badge = titel.querySelector('.vol-badge, .lock-badge');
+
+    if (!label) {
+      if (badge) badge.remove();
+      return;
     }
+    if (!badge) {
+      badge = document.createElement('span');
+      titel.appendChild(badge);
+    }
+    badge.className   = label === 'Vergrendeld' ? 'lock-badge' : 'vol-badge';
+    badge.textContent = label;
   }
 
   /** Past de doelgroepkaarten op stap 1 aan, plus de bulk-knop (die is kinderen-only). */
@@ -1234,13 +1283,15 @@ Zorg dat de plugin "Arrahma Inschrijvingen" geactiveerd is in WordPress → Plug
     document.querySelectorAll('input[name="inschrijving_voor"]').forEach(radio => {
       const kaart  = radio.closest('.msf-radio-card');
       const status = categorieStatus(radio.value);
+      // Een doelgroep die niet in de toegangslink zit gaat op slot: wél zichtbaar, niet kiesbaar.
+      const opSlot = status !== 'verborgen' && !categorieIsToegestaan(radio.value);
 
       kaart.style.display = status === 'verborgen' ? 'none' : '';
-      radio.disabled      = status !== 'open';
-      zetGeslotenBadge(kaart, status === 'gesloten');
+      radio.disabled      = status !== 'open' || opSlot;
+      zetKaartBadge(kaart, opSlot ? 'Vergrendeld' : (status === 'gesloten' ? 'Gesloten' : null));
 
-      // Een al gekozen doelgroep die dichtgaat, weer loslaten.
-      if (radio.checked && status !== 'open') {
+      // Een al gekozen doelgroep die dichtgaat of op slot gaat, weer loslaten.
+      if (radio.checked && radio.disabled) {
         radio.checked = false;
         kaart.classList.remove('selected');
         if (selectedCategory === radio.value) selectedCategory = null;
@@ -1250,9 +1301,11 @@ Zorg dat de plugin "Arrahma Inschrijvingen" geactiveerd is in WordPress → Plug
     const bulkBtn = document.querySelector('.msf-mode-btn[data-mode="bulk"]');
     const kStatus = categorieStatus('kinderen');
     if (bulkBtn) {
+      // Bulk is kinderen-only, dus volgt de doelgroep Kinderen — inclusief het slot van de link.
+      const bulkKan = kStatus === 'open' && categorieIsToegestaan('kinderen');
       bulkBtn.style.display = kStatus === 'verborgen' ? 'none' : '';
-      bulkBtn.disabled      = kStatus !== 'open';
-      if (kStatus !== 'open' && formMode === 'bulk') setMode('single');
+      bulkBtn.disabled      = !bulkKan;
+      if (!bulkKan && formMode === 'bulk') setMode('single');
     }
   }
 
@@ -1263,23 +1316,52 @@ Zorg dat de plugin "Arrahma Inschrijvingen" geactiveerd is in WordPress → Plug
   }
 
   // ── Stap 1: radio cards ──
-  document.querySelectorAll('input[name="inschrijving_voor"]').forEach(radio => {
-    radio.addEventListener('change', function () {
-      selectedCategory = this.value;
-      document.querySelectorAll('.msf-radio-card').forEach(c => {
-        if (c.querySelector('input[name="inschrijving_voor"]')) c.classList.remove('selected');
-      });
-      this.closest('.msf-radio-card').classList.add('selected');
-      document.getElementById('error-stap1').style.display = 'none';
+  /**
+   * Kiest een doelgroep. Gedeeld pad voor een klik van de bezoeker én voor de automatische
+   * keuze bij binnenkomst via een toegangslink, zodat beide exact hetzelfde doen.
+   * Geeft false terug als de doelgroep niet gekozen kan worden (onbekend of dicht).
+   */
+  function kiesCategorie(waarde) {
+    const radio = document.querySelector('input[name="inschrijving_voor"][value="' + waarde + '"]');
+    if (!radio || radio.disabled) return false;
 
-      // Capaciteit is voor alle doelgroepen relevant (lesblokken én lesgroepen).
-      fetchRoosterCounts().then(() => {
-        if (selectedCategory !== 'kinderen') renderGroepen();
-      });
+    radio.checked    = true;
+    selectedCategory = waarde;
 
-      applyCategoryToStep3();
+    document.querySelectorAll('.msf-radio-card').forEach(c => {
+      if (c.querySelector('input[name="inschrijving_voor"]')) c.classList.remove('selected');
     });
+    radio.closest('.msf-radio-card').classList.add('selected');
+    document.getElementById('error-stap1').style.display = 'none';
+
+    // Capaciteit is voor alle doelgroepen relevant (lesblokken én lesgroepen).
+    fetchRoosterCounts().then(() => {
+      if (selectedCategory !== 'kinderen') renderGroepen();
+    });
+
+    applyCategoryToStep3();
+    return true;
+  }
+
+  document.querySelectorAll('input[name="inschrijving_voor"]').forEach(radio => {
+    radio.addEventListener('change', function () { kiesCategorie(this.value); });
   });
+
+  /** De doelgroep waar de meegegeven toegangscodes bij horen, of null als dat er niet precies één is. */
+  function doelgroepUitToegangscodes() {
+    const uniek = [...new Set(ontgrendeldeSlots().map(categorieVanSlot).filter(Boolean))];
+    return uniek.length === 1 ? uniek[0] : null;
+  }
+
+  /**
+   * Binnenkomen via een toegangslink kiest de doelgroep alvast, zodat meteen duidelijk is waar
+   * de link voor geldt. Wijzen de codes naar meerdere doelgroepen, dan blijft de keuze aan de
+   * bezoeker — dan is er geen enkele juiste voorselectie.
+   */
+  function pasToegangslinkToe() {
+    const doelgroep = doelgroepUitToegangscodes();
+    if (doelgroep) kiesCategorie(doelgroep);
+  }
 
   /** Stap 3 toont niveaus (kinderen) óf lesgroepen (jongeren & volwassenen). */
   function applyCategoryToStep3() {
@@ -1422,37 +1504,28 @@ Zorg dat de plugin "Arrahma Inschrijvingen" geactiveerd is in WordPress → Plug
       const key    = radio.value;
       const card   = radio.closest('.msf-radio-card');
       const dicht  = !slotIsSelectable(key);              // gesloten of verborgen
+      const opSlot = !slotIsToegestaan(key);              // zit niet in de toegangslink
       const full   = (roosterCounts[key] ?? 0) >= capForKey(key);
 
       // 'verborgen': lesblok helemaal niet tonen.
       card.style.display = slotIsHidden(key) ? 'none' : '';
 
-      radio.disabled = full || dicht;
+      radio.disabled = full || dicht || opSlot;
       if (radio.disabled && radio.checked) { radio.checked = false; card.classList.remove('selected'); }
-      card.style.opacity = dicht ? '.55' : '';
+      card.style.opacity = (dicht || opSlot) ? '.55' : '';
 
-      const strongEl = card.querySelector('.msf-radio-card-text strong');
-      let badge = strongEl.querySelector('.vol-badge');
-      const label = dicht ? 'Gesloten' : (full ? 'Vol' : null);
-
-      if (label && !badge) {
-        badge = document.createElement('span');
-        badge.className = 'vol-badge';
-        strongEl.appendChild(badge);
-      } else if (!label && badge) {
-        badge.remove();
-        badge = null;
-      }
-      if (badge) badge.textContent = label;
+      zetKaartBadge(card, dicht ? 'Gesloten' : (opSlot ? 'Vergrendeld' : (full ? 'Vol' : null)));
     });
 
     document.querySelectorAll('select[data-field="rooster"]').forEach(sel => {
       Array.from(sel.options).forEach(opt => {
         if (!opt.value) return; // placeholder "Kies lesdagen"
-        const full = (roosterCounts[opt.value] ?? 0) >= capForKey(opt.value);
-        opt.disabled = full;
-        opt.textContent = opt.textContent.replace(/ \(Vol\)$/, '') + (full ? ' (Vol)' : '');
-        if ( full && sel.value === opt.value ) sel.value = '';
+        const full   = (roosterCounts[opt.value] ?? 0) >= capForKey(opt.value);
+        const opSlot = !slotIsSelectable(opt.value) || !slotIsToegestaan(opt.value);
+        opt.disabled = full || opSlot;
+        opt.textContent = opt.textContent.replace(/ \((Vol|Gesloten|Vergrendeld)\)$/, '')
+                        + (opSlot ? (slotIsSelectable(opt.value) ? ' (Vergrendeld)' : ' (Gesloten)') : (full ? ' (Vol)' : ''));
+        if ( opt.disabled && sel.value === opt.value ) sel.value = '';
       });
     });
   }
@@ -2122,6 +2195,9 @@ Zorg dat de plugin "Arrahma Inschrijvingen" geactiveerd is in WordPress → Plug
     // Terug naar 'één inschrijving' (herstelt categorie/bulk-zichtbaarheid + knoppen)
     setMode('single');
 
+    // De toegangslink geldt nog steeds: doelgroep opnieuw voorselecteren voor een volgende inschrijving.
+    pasToegangslinkToe();
+
     // Verzendknoppen weer inschakelen
     ['submitBtn', 'submitBtnBulk'].forEach(id => {
       const b = document.getElementById(id);
@@ -2179,10 +2255,12 @@ Zorg dat de plugin "Arrahma Inschrijvingen" geactiveerd is in WordPress → Plug
           showClosedMessage(data && data.message);
         } else {
           showSignupForm();
+          pasToegangslinkToe();
         }
       })
       // Bij een fout tonen we het formulier: falen naar het huidige gedrag,
-      // zodat een tijdelijke storing geen inschrijvingen blokkeert.
-      .catch(() => showSignupForm());
+      // zodat een tijdelijke storing geen inschrijvingen blokkeert. De standaardstatus uit
+      // GROEPEN geldt dan, dus een toegangslink werkt ook zonder /form-mode.
+      .catch(() => { showSignupForm(); pasToegangslinkToe(); });
   })();
 </script>
