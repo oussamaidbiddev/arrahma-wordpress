@@ -962,8 +962,33 @@ Zorg dat de plugin "Arrahma Inschrijvingen" geactiveerd is in WordPress → Plug
   let slotStatus = {};
   let slotCaps   = {};
 
-  function slotIsHidden(key)     { return slotStatus[key] === 'verborgen'; }
-  function slotIsSelectable(key) { return (slotStatus[key] || 'open') === 'open'; }
+  // ── Toegangslink ──
+  // Lesgroepen met status 'op_uitnodiging' staan niet publiek op het formulier. Ze verschijnen
+  // alleen als hun sleutel in de URL staat: ?toegang=br_volw_n5_zo (meerdere met komma's ertussen).
+  // Bewust géén beveiliging: wie de link heeft, mag inschrijven — de server accepteert deze
+  // groepen dan ook gewoon. Moet gelijk blijven aan ARRAHMA_TOEGANG_PARAM in de plugin.
+  const TOEGANG_PARAM = 'toegang';
+
+  const toegangsCodes = (() => {
+    try {
+      const ruw = new URLSearchParams(window.location.search).get(TOEGANG_PARAM) || '';
+      return ruw.split(',').map(s => s.trim()).filter(Boolean);
+    } catch (e) {
+      return [];
+    }
+  })();
+
+  /** Effectieve status van een lesblok/lesgroep, met de toegangslink meegewogen. */
+  function slotStatusVoor(key) {
+    const status = slotStatus[key] || (GROEPEN[key] || {}).standaardStatus || 'open';
+    if (status === 'op_uitnodiging') {
+      return toegangsCodes.includes(key) ? 'open' : 'verborgen';
+    }
+    return status;
+  }
+
+  function slotIsHidden(key)     { return slotStatusVoor(key) === 'verborgen'; }
+  function slotIsSelectable(key) { return slotStatusVoor(key) === 'open'; }
 
   // ══════════════════════════════════════════════════════════
   //  LESGROEPEN — jongeren & volwassenen (briefing 2026–2027)
@@ -1009,11 +1034,12 @@ Zorg dat de plugin "Arrahma Inschrijvingen" geactiveerd is in WordPress → Plug
     br_volw_n4_zo: { categorie: 'broeders_volwassenen', niveau: 'n4', dag: 'Zondag',   tijd: '09:30–11:00' },
     br_jong_n1_zo: { categorie: 'broeders_jongeren',    niveau: 'n1', dag: 'Zondag',   tijd: '11:30–13:30' },
     br_jong_n2_za: { categorie: 'broeders_jongeren',    niveau: 'n2', dag: 'Zaterdag', tijd: '11:30–13:30' },
-    // Niveau 5 is alleen voor volwassen broeders (17+), niet voor jongeren 12–16.
-    br_volw_n5_zo: { categorie: 'broeders_volwassenen', niveau: 'n5', dag: 'Zondag', tijd: '19:00', toets: true },
+    // Niveau 5 (al-Ājurrūmiyyah): alleen voor volwassen broeders (17+), en alleen zichtbaar
+    // met de toegangslink — die wordt uitgedeeld aan wie de niveautoets heeft gehaald.
+    br_volw_n5_zo: { categorie: 'broeders_volwassenen', niveau: 'n5', dag: 'Zondag', tijd: '19:00', standaardStatus: 'op_uitnodiging' },
     zu_volw_basis_ma: { categorie: 'zusters_volwassenen', niveau: 'z_basis',     dag: 'Maandag',   tijd: '19:00–20:30' },
     zu_volw_gev_do:   { categorie: 'zusters_volwassenen', niveau: 'z_gevorderd', dag: 'Donderdag', tijd: '19:00–20:30' },
-    zu_jong_basis_wo: { categorie: 'zusters_jongeren',    niveau: 'z_basis',     dag: 'Woensdag',  tijd: '18:00–19:30' },
+    zu_jong_basis_wo: { categorie: 'zusters_jongeren',    niveau: 'z_basis',     dag: 'Dinsdag',  tijd: '18:00–19:30' },
     zu_jong_gev_wo:   { categorie: 'zusters_jongeren',    niveau: 'z_gevorderd', dag: 'Woensdag',  tijd: '18:00–19:30' },
   };
 

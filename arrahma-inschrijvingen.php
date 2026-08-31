@@ -2,14 +2,14 @@
 /**
  * Plugin Name: Arrahma Inschrijvingen
  * Description: Slaat lesaanmeldingen op in de database en toont ze in een overzichtspagina met CSV-export.
- * Version:     1.10.0
+ * Version:     1.11.0
  * Author:      Vereniging Arrahma
  */
 
 if ( ! defined( 'ABSPATH' ) ) exit;
 
 define( 'ARRAHMA_TABLE',       'arrahma_inschrijvingen' );
-define( 'ARRAHMA_VERSION',     '1.10.0' );
+define( 'ARRAHMA_VERSION',     '1.11.0' );
 
 // Standaardcapaciteit. De capaciteit is per lesblok/lesgroep in te stellen via
 // Inschrijvingen → Instellingen; deze waarden gelden zolang daar niets is opgeslagen.
@@ -30,6 +30,12 @@ define( 'ARRAHMA_SLOT_STATUS_OPTION',    'arrahma_slot_status' );
 
 // Capaciteit per lesblok/lesgroep: [ sleutel => aantal ]. Ontbrekend = standaard hierboven.
 define( 'ARRAHMA_SLOT_CAP_OPTION',       'arrahma_slot_caps' );
+
+// Lesgroepen met status 'op_uitnodiging' verschijnen alleen als de bezoeker hun sleutel
+// meekrijgt in de URL: ?toegang=br_volw_n5_zo (meerdere gescheiden door komma's).
+// Bewust géén beveiliging — wie de link heeft, mag inschrijven.
+// Moet gelijk blijven aan TOEGANG_PARAM in index.html.
+define( 'ARRAHMA_TOEGANG_PARAM', 'toegang' );
 
 // Ouderavond-uitnodiging: prefill-doelvelden op het Google Form (zie docs/wayfinder/tickets/parent-meeting-emails/01-create-google-form.md)
 define( 'ARRAHMA_OUDERAVOND_FORM_ID',     '1FAIpQLSflfMJHypxN8eccuTc5ScD-UWaqzG941QJ2rvTKD-iK5l-q2g' );
@@ -138,7 +144,12 @@ function arrahma_niveau_labels(): array {
  * Lesgroepen voor jongeren & volwassenen. Elke groep koppelt categorie + niveau aan één vast
  * lesmoment, dus de deelnemer kiest niveau en lesmoment in één keer.
  *
- * 'toets' => true betekent: geen directe inschrijving, eerst een niveautoets aanvragen.
+ * Optionele velden per groep:
+ *   'standaard_status' => een van arrahma_slot_status_labels(); geldt zolang er in Instellingen
+ *                         niets is opgeslagen. Zonder dit veld staat een groep standaard open.
+ *   'toets' => true     => geen directe inschrijving, eerst een niveautoets aanvragen (mailto-kaart).
+ *                         Op dit moment door geen enkele groep gebruikt: Niveau 5 loopt sinds
+ *                         2026-08-31 via een toegangslink. Het mechanisme blijft beschikbaar.
  *
  * UITBREIDEN: hier een regel toevoegen is genoeg — formulier, capaciteit, admin en CSV volgen mee.
  */
@@ -152,14 +163,15 @@ function arrahma_groepen(): array {
         'br_jong_n1_zo' => [ 'categorie' => 'broeders_jongeren',    'niveau' => 'n1', 'dag' => 'Zondag',   'tijd' => '11:30–13:30' ],
         'br_jong_n2_za' => [ 'categorie' => 'broeders_jongeren',    'niveau' => 'n2', 'dag' => 'Zaterdag', 'tijd' => '11:30–13:30' ],
 
-        // Niveau 5: alleen voor volwassen broeders (17+). Dag en tijd zijn bekend, maar
-        // inschrijven kan pas na de niveautoets.
-        'br_volw_n5_zo' => [ 'categorie' => 'broeders_volwassenen', 'niveau' => 'n5', 'dag' => 'Zondag', 'tijd' => '19:00', 'toets' => true ],
+        // Niveau 5 (al-Ājurrūmiyyah): alleen voor volwassen broeders (17+), en staat standaard
+        // niet publiek op het formulier — de groep verschijnt pas met de toegangslink, die wordt
+        // uitgedeeld aan wie de niveautoets heeft gehaald. Zie ARRAHMA_TOEGANG_PARAM.
+        'br_volw_n5_zo' => [ 'categorie' => 'broeders_volwassenen', 'niveau' => 'n5', 'dag' => 'Zondag', 'tijd' => '19:00', 'standaard_status' => 'op_uitnodiging' ],
 
         // ── Zusters
         'zu_volw_basis_ma' => [ 'categorie' => 'zusters_volwassenen', 'niveau' => 'z_basis',     'dag' => 'Maandag',   'tijd' => '19:00–20:30' ],
         'zu_volw_gev_do'   => [ 'categorie' => 'zusters_volwassenen', 'niveau' => 'z_gevorderd', 'dag' => 'Donderdag', 'tijd' => '19:00–20:30' ],
-        'zu_jong_basis_wo' => [ 'categorie' => 'zusters_jongeren',    'niveau' => 'z_basis',     'dag' => 'Woensdag',  'tijd' => '18:00–19:30' ],
+        'zu_jong_basis_wo' => [ 'categorie' => 'zusters_jongeren',    'niveau' => 'z_basis',     'dag' => 'Dinsdag',  'tijd' => '18:00–19:30' ],
         'zu_jong_gev_wo'   => [ 'categorie' => 'zusters_jongeren',    'niveau' => 'z_gevorderd', 'dag' => 'Woensdag',  'tijd' => '18:00–19:30' ],
     ];
 }
@@ -244,27 +256,44 @@ function arrahma_closed_message(): string {
 /** Mogelijke statussen per lesblok/lesgroep. */
 function arrahma_slot_status_labels(): array {
     return [
-        'open'      => 'Open — kan gekozen worden',
-        'gesloten'  => 'Gesloten — wel zichtbaar, niet kiesbaar',
-        'verborgen' => 'Verborgen — helemaal niet tonen',
+        'open'           => 'Open — kan gekozen worden',
+        'gesloten'       => 'Gesloten — wel zichtbaar, niet kiesbaar',
+        'verborgen'      => 'Verborgen — helemaal niet tonen',
+        'op_uitnodiging' => 'Alleen via link — verborgen, behalve voor wie de link heeft',
     ];
 }
 
-/** Status van alle lesblokken en lesgroepen; ontbrekende sleutels zijn 'open'. */
+/** Standaardstatus zolang er in Instellingen niets is opgeslagen; per lesgroep in te stellen. */
+function arrahma_default_slot_status( string $key ): string {
+    return arrahma_groepen()[ $key ]['standaard_status'] ?? 'open';
+}
+
+/** Status van alle lesblokken en lesgroepen; ontbrekende sleutels krijgen hun standaardstatus. */
 function arrahma_slot_statuses(): array {
     $opgeslagen = get_option( ARRAHMA_SLOT_STATUS_OPTION, [] );
     if ( ! is_array( $opgeslagen ) ) $opgeslagen = [];
 
     $statuses = [];
     foreach ( array_keys( arrahma_roster_labels() ) as $key ) {
-        $waarde = $opgeslagen[ $key ] ?? 'open';
-        $statuses[ $key ] = isset( arrahma_slot_status_labels()[ $waarde ] ) ? $waarde : 'open';
+        $standaard = arrahma_default_slot_status( $key );
+        $waarde    = $opgeslagen[ $key ] ?? $standaard;
+        $statuses[ $key ] = isset( arrahma_slot_status_labels()[ $waarde ] ) ? $waarde : $standaard;
     }
     return $statuses;
 }
 
 function arrahma_slot_status_for( string $key ): string {
-    return arrahma_slot_statuses()[ $key ] ?? 'open';
+    return arrahma_slot_statuses()[ $key ] ?? arrahma_default_slot_status( $key );
+}
+
+/**
+ * Mag er op dit lesblok/deze lesgroep ingeschreven worden?
+ *
+ * 'op_uitnodiging' telt hier mee als open. De link is bewust géén beveiliging — hij zorgt er
+ * alleen voor dat de groep niet publiek op het formulier staat. Wie de link heeft, mag inschrijven.
+ */
+function arrahma_slot_accepts_signups( string $key ): bool {
+    return in_array( arrahma_slot_status_for( $key ), [ 'open', 'op_uitnodiging' ], true );
 }
 
 function arrahma_betaalwijze_labels(): array {
@@ -432,7 +461,7 @@ function arrahma_handle_submission( WP_REST_Request $request ) {
 
     // ── Capaciteitscontrole (race-conditie: iemand anders kan het tijdslot inmiddels hebben volgemaakt)
     // ── Is dit lesblok/lesgroep überhaupt open voor inschrijving?
-    if ( $insert['rooster'] !== '' && arrahma_slot_status_for( $insert['rooster'] ) !== 'open' ) {
+    if ( $insert['rooster'] !== '' && ! arrahma_slot_accepts_signups( $insert['rooster'] ) ) {
         return new WP_Error( 'slot_closed', 'Voor deze groep is de inschrijving gesloten. Kies een andere groep.', [
             'status'  => 409,
             'rooster' => $insert['rooster'],
@@ -516,6 +545,14 @@ function arrahma_handle_bulk_submission( array $data ) {
         }
     }
     foreach ( $rooster_gevraagd as $rooster_waarde => $aantal_gevraagd ) {
+        // Staat dit lesblok überhaupt open? (Dezelfde controle als bij één inschrijving.)
+        if ( ! arrahma_slot_accepts_signups( $rooster_waarde ) ) {
+            return new WP_Error( 'slot_closed', 'Voor één of meer gekozen lesdagen is de inschrijving gesloten. Kies andere lesdagen.', [
+                'status'  => 409,
+                'rooster' => $rooster_waarde,
+            ] );
+        }
+
         $huidig = (int) $wpdb->get_var( $wpdb->prepare(
             "SELECT COUNT(*) FROM {$table} WHERE rooster = %s", $rooster_waarde
         ) );
@@ -1796,8 +1833,9 @@ function arrahma_settings_page() {
         $ingestuurd = (array) ( $_POST['slot_status'] ?? [] );
         $nieuw      = [];
         foreach ( array_keys( arrahma_roster_labels() ) as $key ) {
-            $waarde = sanitize_text_field( wp_unslash( $ingestuurd[ $key ] ?? 'open' ) );
-            $nieuw[ $key ] = isset( arrahma_slot_status_labels()[ $waarde ] ) ? $waarde : 'open';
+            $standaard = arrahma_default_slot_status( $key );
+            $waarde    = sanitize_text_field( wp_unslash( $ingestuurd[ $key ] ?? $standaard ) );
+            $nieuw[ $key ] = isset( arrahma_slot_status_labels()[ $waarde ] ) ? $waarde : $standaard;
         }
         update_option( ARRAHMA_SLOT_STATUS_OPTION, $nieuw );
 
@@ -1872,6 +1910,10 @@ function arrahma_settings_page() {
           <p style="color:#888;font-size:.85rem;margin:0 0 1rem">
             Per groep instelbaar. <strong>Gesloten</strong> laat de groep wél zien (met dag en tijd) maar maakt hem niet kiesbaar —
             handig als één groep gepauzeerd is terwijl de rest gewoon open blijft. <strong>Verborgen</strong> haalt de groep helemaal van het formulier.
+            <strong>Alleen via link</strong> verbergt de groep óók, behalve voor bezoekers die de toegangslink hebben —
+            handig voor een groep waar je eerst voor toegelaten moet worden. Zodra je die status kiest en opslaat,
+            verschijnt hieronder het stukje dat je achter de URL van de inschrijfpagina plakt.
+            Let op: dat is géén beveiliging, iedereen mét de link kan inschrijven.
             De site-brede schakelaar hierboven gaat vóór deze instellingen.
             <br>
             <strong>Max.</strong> is het aantal plaatsen; is dat bereikt, dan krijgt de groep automatisch het label “Vol”
@@ -1917,9 +1959,15 @@ function arrahma_settings_page() {
                     <td>
                       <select name="slot_status[<?= esc_attr( $key ) ?>]" style="width:100%">
                         <?php foreach ( arrahma_slot_status_labels() as $val => $slabel ) : ?>
-                          <option value="<?= esc_attr( $val ) ?>" <?= selected( $slot_statuses[ $key ] ?? 'open', $val, false ) ?>><?= esc_html( $slabel ) ?></option>
+                          <option value="<?= esc_attr( $val ) ?>" <?= selected( $slot_statuses[ $key ] ?? arrahma_default_slot_status( $key ), $val, false ) ?>><?= esc_html( $slabel ) ?></option>
                         <?php endforeach; ?>
                       </select>
+                      <?php if ( ( $slot_statuses[ $key ] ?? '' ) === 'op_uitnodiging' ) : ?>
+                        <p style="margin:.5rem 0 0;font-size:.8rem;color:#666;line-height:1.5">
+                          Plak achter de URL van de inschrijfpagina:<br>
+                          <code style="user-select:all;background:#f4f6f8;padding:2px 6px;border-radius:4px">?<?= esc_html( ARRAHMA_TOEGANG_PARAM ) ?>=<?= esc_html( $key ) ?></code>
+                        </p>
+                      <?php endif; ?>
                     </td>
                   </tr>
             <?php endforeach; ?>
