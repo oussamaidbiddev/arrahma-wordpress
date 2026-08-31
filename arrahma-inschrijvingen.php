@@ -149,9 +149,8 @@ function arrahma_groepen(): array {
         'br_volw_n2_zo' => [ 'categorie' => 'broeders_volwassenen', 'niveau' => 'n2', 'dag' => 'Zondag',   'tijd' => '11:00–12:30' ],
         'br_volw_n3_za' => [ 'categorie' => 'broeders_volwassenen', 'niveau' => 'n3', 'dag' => 'Zaterdag', 'tijd' => '09:30–11:00' ],
         'br_volw_n4_zo' => [ 'categorie' => 'broeders_volwassenen', 'niveau' => 'n4', 'dag' => 'Zondag',   'tijd' => '09:30–11:00' ],
-        'br_jong_n1_zo' => [ 'categorie' => 'broeders_jongeren',    'niveau' => 'n1', 'dag' => 'Zondag',   'tijd' => '11:00–12:30' ],
-        'br_jong_n2_zo' => [ 'categorie' => 'broeders_jongeren',    'niveau' => 'n2', 'dag' => 'Zondag',   'tijd' => '11:00–12:30' ],
-        'br_jong_n3_za' => [ 'categorie' => 'broeders_jongeren',    'niveau' => 'n3', 'dag' => 'Zaterdag', 'tijd' => '11:30–13:00' ],
+        'br_jong_n1_zo' => [ 'categorie' => 'broeders_jongeren',    'niveau' => 'n1', 'dag' => 'Zondag',   'tijd' => '11:30–13:30' ],
+        'br_jong_n2_za' => [ 'categorie' => 'broeders_jongeren',    'niveau' => 'n2', 'dag' => 'Zaterdag', 'tijd' => '11:30–13:30' ],
 
         // Niveau 5: alleen voor volwassen broeders (17+). Dag en tijd zijn bekend, maar
         // inschrijven kan pas na de niveautoets.
