@@ -183,15 +183,45 @@ function arrahma_groep_label( string $key ): string {
     return $g['dag'] . ' ' . $g['tijd'] . ' — ' . arrahma_niveau_label( $g['niveau'] );
 }
 
+/**
+ * Vaste lesblokken voor kinderen, met dag en tijd apart.
+ *
+ * Apart gehouden omdat de plaatsingsmail dag en tijd los van elkaar toont; het label eronder
+ * wordt hieruit opgebouwd, zodat er één bron van waarheid blijft.
+ */
+function arrahma_kinderen_blokken(): array {
+    return [
+        'za_zo_blok1' => [ 'dag' => 'Zaterdag & zondag',   'tijd' => '09:00–11:00', 'blok' => 'blok 1' ],
+        'za_zo_blok2' => [ 'dag' => 'Zaterdag & zondag',   'tijd' => '11:15–13:15', 'blok' => 'blok 2' ],
+        'za_zo_blok3' => [ 'dag' => 'Zaterdag & zondag',   'tijd' => '13:30–15:30', 'blok' => 'blok 3' ],
+        'ma_wo'       => [ 'dag' => 'Maandag & woensdag',  'tijd' => '15:30–17:30' ],
+        'di_do'       => [ 'dag' => 'Dinsdag & donderdag', 'tijd' => '15:30–17:30' ],
+    ];
+}
+
+/** Dag en tijd van één lesblok of lesgroep, los van elkaar. Onbekende sleutel geeft lege waarden. */
+function arrahma_slot_dag_tijd( string $key ): array {
+    $groep = arrahma_groepen()[ $key ] ?? null;
+    if ( $groep ) {
+        return [ 'dag' => $groep['dag'], 'tijd' => $groep['tijd'] ];
+    }
+
+    $blok = arrahma_kinderen_blokken()[ $key ] ?? null;
+    if ( $blok ) {
+        return [ 'dag' => $blok['dag'], 'tijd' => $blok['tijd'] ];
+    }
+
+    return [ 'dag' => '', 'tijd' => '' ];
+}
+
 /** Vaste lesblokken (kinderen) plus alle lesgroepen (jongeren & volwassenen). */
 function arrahma_roster_labels(): array {
-    $labels = [
-        'za_zo_blok1' => 'Zaterdag & zondag — 09:00–11:00 (blok 1)',
-        'za_zo_blok2' => 'Zaterdag & zondag — 11:15–13:15 (blok 2)',
-        'za_zo_blok3' => 'Zaterdag & zondag — 13:30–15:30 (blok 3)',
-        'ma_wo'       => 'Maandag & woensdag — 15:30–17:30',
-        'di_do'       => 'Dinsdag & donderdag — 15:30–17:30',
-    ];
+    $labels = [];
+
+    foreach ( arrahma_kinderen_blokken() as $key => $blok ) {
+        $labels[ $key ] = $blok['dag'] . ' — ' . $blok['tijd']
+                        . ( isset( $blok['blok'] ) ? ' (' . $blok['blok'] . ')' : '' );
+    }
 
     foreach ( array_keys( arrahma_groepen() ) as $key ) {
         $labels[ $key ] = arrahma_groep_label( $key );
@@ -934,59 +964,129 @@ function arrahma_send_confirmation_email( string $email, array $rows, string $su
 }
 
 /**
- * Verstuurt de definitieve indeling: alleen naam + lesdag/lestijd, verder niets.
+ * Verstuurt de definitieve plaatsing: dag en tijd van het lesmoment, verder geen gegevens.
  *
  * Bewust zonder geboortedatum, adres, IBAN of betaalwijze — die staan al in de bevestigingsmail.
- * Deze mail is het laatste woord over "wanneer moet ik komen", dus alles wat daar niet bij helpt
- * laten we weg. Werkt voor één ingeschrevene én voor een gezin (meerdere rijen, één e-mailadres).
+ * De tekst voor kinderen is aangeleverd door de Religieuze Commissie; die versie bevat ook het
+ * stuk over de verplichte ouderbijeenkomst. Jongeren en volwassenen die zichzelf inschrijven
+ * krijgen dezelfde structuur zonder dat stuk, omdat het daar niet op slaat.
+ *
+ * 'gemengd' (kinderen én een volwassene op één adres) krijgt de oudertekst: er zitten kinderen
+ * bij, dus de ouderbijeenkomst geldt wel degelijk voor die lezer.
  */
 function arrahma_send_indeling_email( string $email, array $rows, string $subject_prefix = '' ): void {
     if ( empty( $rows ) || ! $email ) return;
 
-    $rows   = array_values( $rows );
-    $count  = count( $rows );
-    $soort  = arrahma_email_doelgroep_soort( $rows );
-    $aanhef = arrahma_email_aanhef( $rows );
+    $rows  = array_values( $rows );
+    $meer  = count( $rows ) > 1;
+    $ouder = ( arrahma_email_doelgroep_soort( $rows ) !== 'zelf' );
 
-    if ( $count === 1 ) {
-        $intro = $soort === 'ouder'
-            ? 'De indeling is rond. Hieronder vind je de lesdag en lestijd van je kind.'
-            : 'De indeling is rond. Hieronder vind je de lesdag en lestijd.';
-    } else {
-        $intro = $soort === 'ouder'
-            ? 'De indeling is rond. Hieronder vind je per kind de lesdag en lestijd.'
-            : 'De indeling is rond. Hieronder vind je per ingeschrevene de lesdag en lestijd.';
-    }
-
-    $regels = '';
-    $i      = 0;
+    // ── Lesmoment(en) in dezelfde opmaak als de andere e-mails: een kopje in kapitalen
+    // boven de gedeelde gegevenstabel (arrahma_email_row), niet in een eigen blokstijl.
+    $lesmomenten = '';
+    $i           = 0;
     foreach ( $rows as $row ) {
         $r    = arrahma_row_to_array( $row );
-        $naam = trim( ( $r['voornaam'] ?? '' ) . ' ' . ( $r['achternaam'] ?? '' ) ) ?: '—';
-        $slot = ! empty( $r['rooster'] ) ? arrahma_roster_label( $r['rooster'] ) : 'Nog niet ingedeeld';
-        $regels .= arrahma_email_row( $naam, $slot, ( $i % 2 === 1 ) );
+        $naam = trim( ( $r['voornaam'] ?? '' ) . ' ' . ( $r['achternaam'] ?? '' ) );
+        $dt   = arrahma_slot_dag_tijd( (string) ( $r['rooster'] ?? '' ) );
         $i++;
+
+        $rijen = ( $dt['dag'] !== '' || $dt['tijd'] !== '' )
+            ? arrahma_email_row( '📅 Dag', $dt['dag'] ?: '—', false )
+              . arrahma_email_row( '🕐 Tijd', $dt['tijd'] ?: '—', true )
+            : arrahma_email_row( 'Lesmoment', 'Nog niet ingedeeld', false );
+
+        $kop = $meer ? ( $naam !== '' ? $naam : 'Ingeschrevene ' . $i ) : 'Lesmoment';
+
+        $lesmomenten .= '
+        <p style="margin:22px 0 8px;font-size:11px;font-weight:700;letter-spacing:0.1em;text-transform:uppercase;color:#2d3a4a;">' . esc_html( $kop ) . '</p>
+        <table width="100%" cellpadding="0" cellspacing="0" style="border-radius:6px;overflow:hidden;border:1px solid #e8eaed;">
+          ' . $rijen . '
+        </table>';
     }
 
-    $inner_html = '
-      <h2 style="margin:0 0 20px;font-size:22px;font-weight:700;color:#1a1a1a;">As-salāmu ʿalaykum' . ( $aanhef ? ' ' . esc_html( $aanhef ) : '' ) . ',</h2>
+    // ── Tekstvarianten. Alleen de bewoording verschilt; de opbouw is voor iedereen gelijk.
+    if ( $ouder ) {
+        $dank      = $meer
+            ? 'BarakAllahu feekum voor de inschrijving van jullie kinderen.'
+            : 'BarakAllahu feekum voor de inschrijving van jullie kind.';
+        $geplaatst = $meer
+            ? 'Via deze e-mail laten wij weten dat jullie kinderen definitief zijn geplaatst op de volgende lesmomenten:'
+            : 'Via deze e-mail laten wij weten dat jullie kind definitief is geplaatst op het volgende lesmoment:';
+        $niveau    = $meer
+            ? 'Bij de inschrijving hebben jullie zelf een inschatting gemaakt van het niveau van jullie kinderen. Tijdens de eerste lessen zal de docent het niveau verder beoordelen. Mocht blijken dat een ander niveau beter aansluit, dan kunnen zij worden overgeplaatst naar een andere groep.'
+            : 'Bij de inschrijving hebben jullie zelf een inschatting gemaakt van het niveau van jullie kind. Tijdens de eerste lessen zal de docent het niveau verder beoordelen. Mocht blijken dat een ander niveau beter aansluit, dan kan jullie kind worden overgeplaatst naar een andere groep.';
+        $contact   = 'dan nemen wij hierover eerst contact met jullie op.';
+    } else {
+        $dank      = 'BarakAllahu feekum voor je inschrijving.';
+        $geplaatst = 'Via deze e-mail laten wij weten dat je definitief bent geplaatst op het volgende lesmoment:';
+        $niveau    = 'Tijdens de eerste lessen zal de docent het niveau beoordelen. Mocht blijken dat een ander niveau beter aansluit, dan kun je worden overgeplaatst naar een andere groep.';
+        $contact   = 'dan nemen wij hierover eerst contact met je op.';
+    }
 
-      <p style="margin:0 0 16px;font-size:15px;line-height:1.7;color:#444;">' . esc_html( $intro ) . '</p>
+    // ── Verplichte ouderbijeenkomst: alleen relevant zodra er kinderen bij zitten.
+    $ouderbijeenkomst = ! $ouder ? '' : '
+      <p style="margin:28px 0 8px;font-size:11px;font-weight:700;letter-spacing:0.1em;text-transform:uppercase;color:#2d3a4a;">Verplichte ouderbijeenkomst</p>
 
-      <table width="100%" cellpadding="0" cellspacing="0" style="border-radius:6px;overflow:hidden;border:1px solid #e8eaed;">
-        ' . $regels . '
-      </table>
+      <p style="margin:0 0 16px;font-size:15px;line-height:1.7;color:#444;">
+        Binnenkort ontvangen jullie een aparte e-mail met een uitnodiging voor de verplichte ouderbijeenkomst.
+        Aanwezigheid van minimaal één ouder/verzorger van ieder ingeschreven kind is een voorwaarde voor deelname aan het onderwijs.
+      </p>
+
+      <p style="margin:0 0 16px;font-size:15px;line-height:1.7;color:#444;">
+        We zullen de aanmeldingen hiervoor monitoren en tijdens de ouderbijeenkomst wordt de aanwezigheid geregistreerd.
+      </p>
+
+      <p style="margin:0 0 16px;font-size:15px;line-height:1.7;color:#444;">
+        Tijdens de bijeenkomst staan we onder andere stil bij de nieuwe onderwijsopzet, lesmethode, doelstellingen
+        en afspraken voor het komende schooljaar. Uiteraard is er ook ruimte voor vragen.
+      </p>
 
       <div style="border-left:3px solid #2d3a4a;padding:14px 18px;background:#f4f6f8;border-radius:0 6px 6px 0;margin:28px 0;">
         <p style="margin:0;font-size:13px;color:#555;line-height:1.6;">
-          Vragen over de indeling? Mail ons via
+          📌 Houd je inbox en voor de zekerheid ook je spamfolder in de gaten voor de uitnodiging.
+        </p>
+      </div>';
+
+    $afsluiting = $ouder
+        ? '<p style="margin:0 0 16px;font-size:15px;line-height:1.7;color:#444;">Tot de ouderbijeenkomst, in shaa Allah.</p>'
+        : '';
+
+    $inner_html = '
+      <h2 style="margin:0 0 20px;font-size:22px;font-weight:700;color:#1a1a1a;">Assalam alaykoum wa rahmatullahi wa barakatuh,</h2>
+
+      <p style="margin:0 0 16px;font-size:15px;line-height:1.7;color:#444;">
+        ' . $dank . ' Mocht je nog geen eerdere bevestiging hebben ontvangen, dan bevestigen wij hierbij alsnog de inschrijving.
+      </p>
+
+      <p style="margin:0 0 16px;font-size:15px;line-height:1.7;color:#444;">' . $geplaatst . '</p>
+
+      ' . $lesmomenten . '
+
+      <p style="margin:22px 0 16px;font-size:15px;line-height:1.7;color:#444;">' . $niveau . '</p>
+
+      <p style="margin:0 0 16px;font-size:15px;line-height:1.7;color:#444;">
+        We proberen op hetzelfde lesmoment de verschillende niveaus aan te bieden. Dit kunnen we echter niet in alle
+        gevallen garanderen. Mocht voor een passende niveau-indeling een andere dag en/of tijdstip nodig zijn,
+        ' . $contact . '
+      </p>
+      ' . $ouderbijeenkomst . '
+
+      <div style="border-left:3px solid #2d3a4a;padding:14px 18px;background:#f4f6f8;border-radius:0 6px 6px 0;margin:28px 0;">
+        <p style="margin:0;font-size:13px;color:#555;line-height:1.6;">
+          Heb je vragen of is iets niet duidelijk? Neem dan contact met ons op via
           <a href="mailto:lessen@vereniging-arrahma.nl" style="color:#2d3a4a;font-weight:600;text-decoration:none;">lessen@vereniging-arrahma.nl</a>.
         </p>
       </div>
 
-      <p style="margin:0;font-size:14px;color:#666;">
-        Wassalāmu ʿalaykum wa raḥmatullāhi wa barakātuh,<br>
-        <strong style="color:#1a1a1a;">Vereniging Arrahma</strong>
+      ' . $afsluiting . '
+
+      <p style="margin:0 0 16px;font-size:15px;line-height:1.7;color:#444;">JazakumAllahu khayran.</p>
+
+      <p style="margin:0;font-size:14px;color:#666;line-height:1.7;">
+        <strong style="color:#1a1a1a;">Religieuze Commissie</strong><br>
+        Afdeling Arabisch Onderwijs<br>
+        Vereniging Arrahma
       </p>';
 
     $headers = [
@@ -994,7 +1094,7 @@ function arrahma_send_indeling_email( string $email, array $rows, string $subjec
         'From: Vereniging Arrahma <oudercomite@vereniging-arrahma.nl>',
     ];
 
-    wp_mail( $email, $subject_prefix . 'Definitieve indeling — Vereniging Arrahma', arrahma_email_wrap( $inner_html ), $headers );
+    wp_mail( $email, $subject_prefix . 'Definitieve plaatsing — Vereniging Arrahma', arrahma_email_wrap( $inner_html ), $headers );
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -1053,8 +1153,8 @@ function arrahma_email_types(): array {
             'categorieen'  => null,
         ],
         'indeling' => [
-            'label'        => 'Definitieve indeling',
-            'omschrijving' => 'alleen naam, lesdag en lestijd — te versturen zodra de indeling rond is.',
+            'label'        => 'Definitieve plaatsing',
+            'omschrijving' => 'lesdag en lestijd van het toegewezen lesmoment — te versturen zodra de indeling rond is. Bij kinderen inclusief het stuk over de verplichte ouderbijeenkomst.',
             'categorieen'  => null,
         ],
     ];
