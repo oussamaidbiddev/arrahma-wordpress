@@ -2,14 +2,14 @@
 /**
  * Plugin Name: Arrahma Inschrijvingen
  * Description: Slaat lesaanmeldingen op in de database en toont ze in een overzichtspagina met CSV-export.
- * Version:     1.11.0
+ * Version:     1.12.0
  * Author:      Vereniging Arrahma
  */
 
 if ( ! defined( 'ABSPATH' ) ) exit;
 
 define( 'ARRAHMA_TABLE',       'arrahma_inschrijvingen' );
-define( 'ARRAHMA_VERSION',     '1.11.0' );
+define( 'ARRAHMA_VERSION',     '1.12.0' );
 
 // Standaardcapaciteit. De capaciteit is per lesblok/lesgroep in te stellen via
 // Inschrijvingen → Instellingen; deze waarden gelden zolang daar niets is opgeslagen.
@@ -781,7 +781,44 @@ function arrahma_format_date( ?string $date ): string {
  * Bouwt het gegevensoverzicht voor de bevestigingsmail: één blok per ingeschrevene,
  * gevolgd door één gedeeld blok met contact-, adres- en betaalgegevens.
  */
-function arrahma_confirmation_details_html( array $rows ): string {
+/**
+ * Wie leest deze e-mail? Bepaalt de aanspreekvorm.
+ *
+ *   'ouder'   — alle rijen zijn kinderen; de lezer is de ouder/verzorger, niet de ingeschrevene
+ *   'zelf'    — niemand is een kind; de lezer heeft zichzelf ingeschreven
+ *   'gemengd' — allebei op één e-mailadres, bijv. een vader die ook zichzelf inschreef
+ */
+function arrahma_email_doelgroep_soort( array $rows ): string {
+    $rows     = array_values( $rows );
+    $kinderen = 0;
+    foreach ( $rows as $row ) {
+        $r = arrahma_row_to_array( $row );
+        if ( ( $r['inschrijving_voor'] ?? '' ) === 'kinderen' ) $kinderen++;
+    }
+    if ( $kinderen === 0 ) return 'zelf';
+    return $kinderen === count( $rows ) ? 'ouder' : 'gemengd';
+}
+
+/**
+ * Voornaam om mee te groeten, of '' als we niemand met zekerheid kunnen aanspreken.
+ *
+ * Bij een kind staat in 'voornaam' de naam van het kínd terwijl de ouder de e-mail leest, en
+ * de contactpersoon-vinkje is optioneel. Staat die niet aan, dan groeten we liever neutraal
+ * ("As-salāmu ʿalaykum,") dan dat we de ouder met de naam van zijn kind aanspreken.
+ */
+function arrahma_email_aanhef( array $rows ): string {
+    if ( empty( $rows ) ) return '';
+    $first = arrahma_row_to_array( array_values( $rows )[0] );
+
+    if ( ! empty( $first['cp_anders'] ) ) {
+        return trim( (string) ( $first['cp_voornaam'] ?? '' ) );
+    }
+    return arrahma_email_doelgroep_soort( $rows ) === 'zelf'
+        ? trim( (string) ( $first['voornaam'] ?? '' ) )
+        : '';
+}
+
+function arrahma_confirmation_details_html( array $rows, string $soort = 'zelf' ): string {
     $labels = arrahma_category_labels();
     $first  = arrahma_row_to_array( $rows[0] );
     $meer   = count( $rows ) > 1;
@@ -800,7 +837,10 @@ function arrahma_confirmation_details_html( array $rows ): string {
             $krows .= arrahma_email_row( 'Lesdagen', arrahma_roster_label( $r['rooster'] ), false );
         }
 
-        $titel = $meer ? 'Ingeschrevene ' . $i : 'Gegevens ingeschrevene';
+        // Bij een ouder die alleen kinderen inschrijft leest "Kind 1" natuurlijker dan "Ingeschrevene 1".
+        $titel = $soort === 'ouder'
+            ? ( $meer ? 'Kind ' . $i : 'Gegevens kind' )
+            : ( $meer ? 'Ingeschrevene ' . $i : 'Gegevens ingeschrevene' );
         $html .= '
         <p style="margin:22px 0 8px;font-size:11px;font-weight:700;letter-spacing:0.1em;text-transform:uppercase;color:#2d3a4a;">' . esc_html( $titel ) . '</p>
         <table width="100%" cellpadding="0" cellspacing="0" style="border-radius:6px;overflow:hidden;border:1px solid #e8eaed;">
@@ -843,31 +883,40 @@ function arrahma_send_confirmation_email( string $email, array $rows, string $su
     $first = arrahma_row_to_array( $rows[0] );
     $count = count( $rows );
 
-    $aanhef = ! empty( $first['cp_anders'] ) ? ( $first['cp_voornaam'] ?? '' ) : ( $first['voornaam'] ?? '' );
-    $aanhef = trim( $aanhef );
+    $soort  = arrahma_email_doelgroep_soort( $rows );
+    $aanhef = arrahma_email_aanhef( $rows );
+    $namen  = esc_html( implode( ', ', arrahma_names_from_rows( $rows ) ) );
 
-    $intro = $count === 1
-        ? 'Bedankt voor je aanmelding. Hieronder vind je een bevestiging van de inschrijving.'
-        : 'Bedankt voor je aanmelding. Hieronder vind je een bevestiging van de inschrijving van ' . $count . ' kinderen.';
-
-    $ingedeeld = $count === 1 ? 'je definitief bent ingedeeld' : 'de kinderen definitief zijn ingedeeld';
+    // De lezer is bij kinderen de ouder en niet de ingeschrevene, dus daar spreken we niet over
+    // "je inschrijving" maar noemen we de kinderen bij naam. $intro bevat opzettelijk HTML
+    // (de namen zijn hierboven al ge-escaped) en wordt daarom niet nogmaals ge-escaped.
+    if ( $soort === 'ouder' ) {
+        $intro     = 'Bedankt voor de aanmelding. Hieronder vind je de bevestiging van de inschrijving van <strong>' . $namen . '</strong>.';
+        $ingedeeld = $count === 1 ? 'je kind definitief is ingedeeld' : 'de kinderen definitief zijn ingedeeld';
+    } elseif ( $soort === 'zelf' && $count === 1 ) {
+        $intro     = 'Bedankt voor je aanmelding. Hieronder vind je de bevestiging van je inschrijving.';
+        $ingedeeld = 'je definitief bent ingedeeld';
+    } else {
+        $intro     = 'Bedankt voor de aanmelding. Hieronder vind je de bevestiging van de inschrijvingen op dit e-mailadres: <strong>' . $namen . '</strong>.';
+        $ingedeeld = 'iedereen definitief is ingedeeld';
+    }
 
     $inner_html = '
       <h2 style="margin:0 0 20px;font-size:22px;font-weight:700;color:#1a1a1a;">As-salāmu ʿalaykum' . ( $aanhef ? ' ' . esc_html( $aanhef ) : '' ) . ',</h2>
 
-      <p style="margin:0 0 16px;font-size:15px;line-height:1.7;color:#444;">' . esc_html( $intro ) . '</p>
+      <p style="margin:0 0 16px;font-size:15px;line-height:1.7;color:#444;">' . $intro . '</p>
 
       <p style="margin:0 0 8px;font-size:15px;line-height:1.7;color:#444;">
         Afhankelijk van de beschikbaarheid wordt er contact met je opgenomen. Nadat ' . $ingedeeld . ' in een klas zal ' . arrahma_incasso_zin( $first['betaalwijze'] ?? 'maandelijks' ) . '.
       </p>
 
-      ' . arrahma_confirmation_details_html( $rows ) . '
+      ' . arrahma_confirmation_details_html( $rows, $soort ) . '
 
       <div style="border-left:3px solid #2d3a4a;padding:14px 18px;background:#f4f6f8;border-radius:0 6px 6px 0;margin:28px 0;">
         <p style="margin:0;font-size:13px;color:#555;line-height:1.6;">
           <strong style="color:#1a1a1a;">Controleer de gegevens hierboven.</strong><br>
           Klopt er iets niet of wil je iets wijzigen? Laat het ons weten via
-          <a href="mailto:info@vereniging-arrahma.nl" style="color:#2d3a4a;font-weight:600;text-decoration:none;">info@vereniging-arrahma.nl</a>.
+          <a href="mailto:lessen@vereniging-arrahma.nl" style="color:#2d3a4a;font-weight:600;text-decoration:none;">lessen@vereniging-arrahma.nl</a>.
         </p>
       </div>
 
@@ -882,6 +931,70 @@ function arrahma_send_confirmation_email( string $email, array $rows, string $su
     ];
 
     wp_mail( $email, $subject_prefix . 'Bevestiging inschrijving — Vereniging Arrahma', arrahma_email_wrap( $inner_html ), $headers );
+}
+
+/**
+ * Verstuurt de definitieve indeling: alleen naam + lesdag/lestijd, verder niets.
+ *
+ * Bewust zonder geboortedatum, adres, IBAN of betaalwijze — die staan al in de bevestigingsmail.
+ * Deze mail is het laatste woord over "wanneer moet ik komen", dus alles wat daar niet bij helpt
+ * laten we weg. Werkt voor één ingeschrevene én voor een gezin (meerdere rijen, één e-mailadres).
+ */
+function arrahma_send_indeling_email( string $email, array $rows, string $subject_prefix = '' ): void {
+    if ( empty( $rows ) || ! $email ) return;
+
+    $rows   = array_values( $rows );
+    $count  = count( $rows );
+    $soort  = arrahma_email_doelgroep_soort( $rows );
+    $aanhef = arrahma_email_aanhef( $rows );
+
+    if ( $count === 1 ) {
+        $intro = $soort === 'ouder'
+            ? 'De indeling is rond. Hieronder vind je de lesdag en lestijd van je kind.'
+            : 'De indeling is rond. Hieronder vind je de lesdag en lestijd.';
+    } else {
+        $intro = $soort === 'ouder'
+            ? 'De indeling is rond. Hieronder vind je per kind de lesdag en lestijd.'
+            : 'De indeling is rond. Hieronder vind je per ingeschrevene de lesdag en lestijd.';
+    }
+
+    $regels = '';
+    $i      = 0;
+    foreach ( $rows as $row ) {
+        $r    = arrahma_row_to_array( $row );
+        $naam = trim( ( $r['voornaam'] ?? '' ) . ' ' . ( $r['achternaam'] ?? '' ) ) ?: '—';
+        $slot = ! empty( $r['rooster'] ) ? arrahma_roster_label( $r['rooster'] ) : 'Nog niet ingedeeld';
+        $regels .= arrahma_email_row( $naam, $slot, ( $i % 2 === 1 ) );
+        $i++;
+    }
+
+    $inner_html = '
+      <h2 style="margin:0 0 20px;font-size:22px;font-weight:700;color:#1a1a1a;">As-salāmu ʿalaykum' . ( $aanhef ? ' ' . esc_html( $aanhef ) : '' ) . ',</h2>
+
+      <p style="margin:0 0 16px;font-size:15px;line-height:1.7;color:#444;">' . esc_html( $intro ) . '</p>
+
+      <table width="100%" cellpadding="0" cellspacing="0" style="border-radius:6px;overflow:hidden;border:1px solid #e8eaed;">
+        ' . $regels . '
+      </table>
+
+      <div style="border-left:3px solid #2d3a4a;padding:14px 18px;background:#f4f6f8;border-radius:0 6px 6px 0;margin:28px 0;">
+        <p style="margin:0;font-size:13px;color:#555;line-height:1.6;">
+          Vragen over de indeling? Mail ons via
+          <a href="mailto:lessen@vereniging-arrahma.nl" style="color:#2d3a4a;font-weight:600;text-decoration:none;">lessen@vereniging-arrahma.nl</a>.
+        </p>
+      </div>
+
+      <p style="margin:0;font-size:14px;color:#666;">
+        Wassalāmu ʿalaykum wa raḥmatullāhi wa barakātuh,<br>
+        <strong style="color:#1a1a1a;">Vereniging Arrahma</strong>
+      </p>';
+
+    $headers = [
+        'Content-Type: text/html; charset=UTF-8',
+        'From: Vereniging Arrahma <oudercomite@vereniging-arrahma.nl>',
+    ];
+
+    wp_mail( $email, $subject_prefix . 'Definitieve indeling — Vereniging Arrahma', arrahma_email_wrap( $inner_html ), $headers );
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -909,6 +1022,77 @@ function arrahma_email_recipients(): array {
     }
 
     return $recipients;
+}
+
+/** Namen van een set inschrijvingsrijen, in dezelfde volgorde. */
+function arrahma_names_from_rows( array $rows ): array {
+    return array_map(
+        function ( $row ) { return trim( $row->voornaam . ' ' . $row->achternaam ); },
+        array_values( $rows )
+    );
+}
+
+/**
+ * De e-mails die vanaf de pagina "E-mails versturen" verstuurd kunnen worden.
+ *
+ * 'categorieen' => null  betekent: bedoeld voor álle doelgroepen.
+ * 'categorieen' => [...] beperkt het type tot die doelgroepen. De ouderavond gaat alleen over
+ * kinderen; een broeder die zichzelf heeft ingeschreven hoort die uitnodiging niet te krijgen,
+ * en al helemaal niet met zijn eigen naam in het formulierveld "Kind(eren)".
+ */
+function arrahma_email_types(): array {
+    return [
+        'ouderavond' => [
+            'label'        => 'Ouderavond-uitnodiging',
+            'omschrijving' => 'link naar het ouderavond-formulier, vooraf ingevuld met e-mailadres en kindnamen.',
+            'categorieen'  => [ 'kinderen' ],
+        ],
+        'bevestiging' => [
+            'label'        => 'Bevestiging inschrijving',
+            'omschrijving' => 'volledig overzicht van de ingevulde gegevens, zodat ze gecontroleerd kunnen worden.',
+            'categorieen'  => null,
+        ],
+        'indeling' => [
+            'label'        => 'Definitieve indeling',
+            'omschrijving' => 'alleen naam, lesdag en lestijd — te versturen zodra de indeling rond is.',
+            'categorieen'  => null,
+        ],
+    ];
+}
+
+/** Doelgroepen waarvoor dit e-mailtype bedoeld is, of null als het voor alle doelgroepen geldt. */
+function arrahma_email_type_categories( string $type ): ?array {
+    return arrahma_email_types()[ $type ]['categorieen'] ?? null;
+}
+
+/**
+ * De inschrijvingsrijen van één ontvanger die bij dit e-mailtype horen.
+ *
+ * Eén e-mailadres kan gemengde rijen hebben — een vader met twee kinderen die zichzelf óók heeft
+ * ingeschreven. Daarom filteren we per rij en niet per ontvanger: hij krijgt de ouderavond-mail
+ * met alleen zijn kinderen erin.
+ */
+function arrahma_rows_for_email_type( array $rows, string $type ): array {
+    $categorieen = arrahma_email_type_categories( $type );
+    if ( $categorieen === null ) return array_values( $rows );
+
+    return array_values( array_filter(
+        $rows,
+        function ( $row ) use ( $categorieen ) {
+            return in_array( $row->inschrijving_voor, $categorieen, true );
+        }
+    ) );
+}
+
+/** Welke e-mailtypes kan deze ontvanger krijgen? */
+function arrahma_types_for_recipient( array $recipient ): array {
+    $types = [];
+    foreach ( array_keys( arrahma_email_types() ) as $type ) {
+        if ( ! empty( arrahma_rows_for_email_type( $recipient['rows'], $type ) ) ) {
+            $types[] = $type;
+        }
+    }
+    return $types;
 }
 
 /** Bouwt een vooraf ingevulde Google Form-link voor één ouder. */
@@ -943,7 +1127,7 @@ function arrahma_send_ouderavond_email( string $email, array $names, string $sub
       <div style="border-left:3px solid #2d3a4a;padding:14px 18px;background:#f4f6f8;border-radius:0 6px 6px 0;margin-bottom:28px;">
         <p style="margin:0;font-size:13px;color:#555;line-height:1.6;">
           Heb je vragen? Neem dan contact op via
-          <a href="mailto:info@vereniging-arrahma.nl" style="color:#2d3a4a;font-weight:600;text-decoration:none;">info@vereniging-arrahma.nl</a>.
+          <a href="mailto:lessen@vereniging-arrahma.nl" style="color:#2d3a4a;font-weight:600;text-decoration:none;">lessen@vereniging-arrahma.nl</a>.
         </p>
       </div>
 
@@ -1120,21 +1304,48 @@ function arrahma_rooster_count( string $rooster, int $exclude_id = 0 ): int {
     ) );
 }
 
-/** Bewerkformulier voor één inschrijving (GET toont, POST slaat op). */
-function arrahma_render_edit_form( int $id ) {
-    global $wpdb;
-    $table = $wpdb->prefix . ARRAHMA_TABLE;
-    $terug = admin_url( 'admin.php?page=arrahma-inschrijvingen' );
-
-    $entry = $wpdb->get_row( $wpdb->prepare( "SELECT * FROM {$table} WHERE id = %d", $id ) );
-    if ( ! $entry ) {
-        echo '<div class="wrap"><h1>Inschrijving bewerken</h1>'
-           . '<div class="notice notice-error"><p>Inschrijving niet gevonden.</p></div>'
-           . '<a href="' . esc_url( $terug ) . '" class="button">&larr; Terug naar overzicht</a></div>';
-        return;
+/** Lege beginwaarden voor een handmatig toegevoegde inschrijving. */
+function arrahma_blank_entry_values(): array {
+    $values = [];
+    foreach ( arrahma_editable_fields() as $field ) {
+        $values[ $field ] = '';
     }
 
-    $values  = arrahma_row_to_array( $entry );
+    return array_merge( $values, [
+        'inschrijving_voor'  => 'kinderen',
+        'betaalwijze'        => 'maandelijks',
+        'status'             => 'nieuw',
+        'cp_anders'          => 0,
+        'groep_id'           => '',
+        'datum_inschrijving' => '',
+    ] );
+}
+
+/**
+ * Formulier voor één inschrijving (GET toont, POST slaat op).
+ *
+ * $id === 0 betekent: nieuwe inschrijving, handmatig toegevoegd vanuit het overzicht.
+ * Dat verstuurt bewust géén e-mail — wie hier wordt ingevoerd komt van een papieren formulier
+ * of een telefoontje en weet al dat hij is ingeschreven. Mailen kan daarna via "E-mails versturen".
+ */
+function arrahma_render_edit_form( int $id ) {
+    global $wpdb;
+    $table  = $wpdb->prefix . ARRAHMA_TABLE;
+    $terug  = admin_url( 'admin.php?page=arrahma-inschrijvingen' );
+    $nieuw  = ( $id === 0 );
+    $entry  = null;
+
+    if ( ! $nieuw ) {
+        $entry = $wpdb->get_row( $wpdb->prepare( "SELECT * FROM {$table} WHERE id = %d", $id ) );
+        if ( ! $entry ) {
+            echo '<div class="wrap"><h1>Inschrijving bewerken</h1>'
+               . '<div class="notice notice-error"><p>Inschrijving niet gevonden.</p></div>'
+               . '<a href="' . esc_url( $terug ) . '" class="button">&larr; Terug naar overzicht</a></div>';
+            return;
+        }
+    }
+
+    $values  = $nieuw ? arrahma_blank_entry_values() : arrahma_row_to_array( $entry );
     $errors  = [];
     $notice  = '';
 
@@ -1183,14 +1394,27 @@ function arrahma_render_edit_form( int $id ) {
         }
 
         if ( empty( $errors ) ) {
-            $update  = [];
+            $data    = [];
             $formats = [];
             foreach ( arrahma_editable_fields() as $f ) {
-                $update[ $f ] = ( $f === 'geboortedatum' ) ? ( $values[ $f ] ?: null ) : $values[ $f ];
-                $formats[]    = ( $f === 'cp_anders' ) ? '%d' : '%s';
+                $data[ $f ] = ( $f === 'geboortedatum' ) ? ( $values[ $f ] ?: null ) : $values[ $f ];
+                $formats[]  = ( $f === 'cp_anders' ) ? '%d' : '%s';
             }
 
-            if ( $wpdb->update( $table, $update, [ 'id' => $id ], $formats, [ '%d' ] ) === false ) {
+            if ( $nieuw ) {
+                // datum_inschrijving laten we aan de kolomstandaard (CURRENT_TIMESTAMP) over.
+                if ( $wpdb->insert( $table, $data, $formats ) === false ) {
+                    $errors[] = 'Opslaan in de database is mislukt.';
+                } else {
+                    // Vanaf hier is het een gewone bewerking van de zojuist aangemaakte rij.
+                    // Zo levert een herlaadde pagina geen tweede inschrijving op.
+                    $id     = (int) $wpdb->insert_id;
+                    $nieuw  = false;
+                    $notice = 'Inschrijving toegevoegd. Er is geen e-mail verstuurd.';
+                    $entry  = $wpdb->get_row( $wpdb->prepare( "SELECT * FROM {$table} WHERE id = %d", $id ) );
+                    $values = arrahma_row_to_array( $entry );
+                }
+            } elseif ( $wpdb->update( $table, $data, [ 'id' => $id ], $formats, [ '%d' ] ) === false ) {
                 $errors[] = 'Opslaan in de database is mislukt.';
             } else {
                 $notice = 'Inschrijving bijgewerkt.';
@@ -1204,9 +1428,21 @@ function arrahma_render_edit_form( int $id ) {
     ?>
     <div class="wrap">
       <h1 style="display:flex;align-items:center;gap:.5rem">
-        <span class="dashicons dashicons-edit" style="font-size:1.5rem;margin-top:3px"></span>
-        Inschrijving bewerken <span style="color:#999;font-weight:400">#<?= (int) $id ?></span>
+        <span class="dashicons <?= $nieuw ? 'dashicons-plus-alt' : 'dashicons-edit' ?>" style="font-size:1.5rem;margin-top:3px"></span>
+        <?php if ( $nieuw ) : ?>
+          Nieuwe inschrijving
+        <?php else : ?>
+          Inschrijving bewerken <span style="color:#999;font-weight:400">#<?= (int) $id ?></span>
+        <?php endif; ?>
       </h1>
+
+      <?php if ( $nieuw ) : ?>
+        <p style="color:#555;max-width:680px">
+          Handmatig toevoegen, bijvoorbeeld na een papieren formulier of een telefoontje.
+          Er wordt <strong>geen e-mail verstuurd</strong> — dat kan daarna via
+          <a href="<?= esc_url( admin_url( 'admin.php?page=arrahma-emails' ) ) ?>">E-mails versturen</a>.
+        </p>
+      <?php endif; ?>
 
       <?php if ( $notice ) : ?>
         <div class="notice notice-success is-dismissible"><p><?= esc_html( $notice ) ?></p></div>
@@ -1220,7 +1456,14 @@ function arrahma_render_edit_form( int $id ) {
 
       <p><a href="<?= esc_url( $terug ) ?>" class="button">&larr; Terug naar overzicht</a></p>
 
-      <form method="post">
+      <?php
+        // Na een geslaagde toevoeging wijst het formulier naar de bewerk-URL van de nieuwe rij,
+        // zodat opnieuw opslaan bijwerkt in plaats van een tweede inschrijving aan te maken.
+        $form_action = $nieuw
+            ? admin_url( 'admin.php?page=arrahma-inschrijvingen&new_entry=1' )
+            : admin_url( 'admin.php?page=arrahma-inschrijvingen&edit_entry=' . $id );
+      ?>
+      <form method="post" action="<?= esc_url( $form_action ) ?>">
         <?php wp_nonce_field( 'arrahma_edit_' . $id ); ?>
 
         <h2 style="font-size:.8rem;text-transform:uppercase;letter-spacing:.08em;color:#2d3a4a;margin:1.5rem 0 .5rem">Gegevens ingeschrevene</h2>
@@ -1363,12 +1606,16 @@ function arrahma_render_edit_form( int $id ) {
           </tr>
         </table>
 
+        <?php if ( ! empty( $values['datum_inschrijving'] ) ) : ?>
         <p style="color:#888;font-size:.85rem">
           Ingeschreven op <?= esc_html( date_i18n( 'd-m-Y H:i', strtotime( $values['datum_inschrijving'] ) ) ) ?><?php if ( ! empty( $values['groep_id'] ) ) : ?> · onderdeel van een gezinsinschrijving<?php endif; ?>
         </p>
+        <?php endif; ?>
 
         <p class="submit">
-          <button type="submit" name="arrahma_save_entry" value="1" class="button button-primary">Wijzigingen opslaan</button>
+          <button type="submit" name="arrahma_save_entry" value="1" class="button button-primary">
+            <?= $nieuw ? 'Inschrijving toevoegen' : 'Wijzigingen opslaan' ?>
+          </button>
           <a href="<?= esc_url( $terug ) ?>" class="button" style="margin-left:.5rem">Annuleren</a>
         </p>
       </form>
@@ -1381,9 +1628,13 @@ function arrahma_admin_page() {
     $table  = $wpdb->prefix . ARRAHMA_TABLE;
     $labels = arrahma_category_labels();
 
-    // ── Bewerkformulier in plaats van de tabel
+    // ── Bewerk- of toevoegformulier in plaats van de tabel
     if ( isset( $_GET['edit_entry'] ) ) {
         arrahma_render_edit_form( intval( $_GET['edit_entry'] ) );
+        return;
+    }
+    if ( isset( $_GET['new_entry'] ) ) {
+        arrahma_render_edit_form( 0 );
         return;
     }
 
@@ -1456,9 +1707,14 @@ function arrahma_admin_page() {
           <a href="<?= esc_url( $url ) ?>" class="button <?= $active ?>"><?= esc_html( $lbl ) ?></a>
           <?php endforeach; ?>
         </div>
-        <a href="<?= esc_url( $export_url ) ?>" class="button button-secondary" style="display:flex;align-items:center;gap:.35rem">
-          <span class="dashicons dashicons-download" style="margin-top:3px"></span> Exporteer als CSV
-        </a>
+        <div style="display:flex;gap:.5rem;flex-wrap:wrap">
+          <a href="<?= esc_url( admin_url( 'admin.php?page=arrahma-inschrijvingen&new_entry=1' ) ) ?>" class="button button-primary" style="display:flex;align-items:center;gap:.35rem">
+            <span class="dashicons dashicons-plus-alt2" style="margin-top:3px"></span> Nieuwe inschrijving
+          </a>
+          <a href="<?= esc_url( $export_url ) ?>" class="button button-secondary" style="display:flex;align-items:center;gap:.35rem">
+            <span class="dashicons dashicons-download" style="margin-top:3px"></span> Exporteer als CSV
+          </a>
+        </div>
       </div>
 
       <!-- Table -->
@@ -1608,10 +1864,8 @@ function arrahma_emails_page() {
     $recipients = arrahma_email_recipients();
     $result     = null;
 
-    $types = [
-        'ouderavond'  => 'Ouderavond-uitnodiging',
-        'bevestiging' => 'Bevestiging inschrijving',
-    ];
+    $email_types = arrahma_email_types();
+    $types       = wp_list_pluck( $email_types, 'label' );
 
     // ── Versturen (na bevestiging via nonce-form)
     if (
@@ -1624,22 +1878,29 @@ function arrahma_emails_page() {
         if ( ! isset( $types[ $type ] ) ) {
             $result = [ 'error' => 'Kies een geldig e-mailtype.' ];
         } elseif ( empty( $selected ) ) {
-            $result = [ 'error' => 'Selecteer minimaal één ouder.' ];
+            $result = [ 'error' => 'Selecteer minimaal één ontvanger.' ];
         } else {
-            $sent = 0;
+            $sent      = 0;
+            $overgesl  = 0; // ontvangers zonder rijen in dit e-mailtype
             foreach ( $selected as $key ) {
                 $key = strtolower( $key );
                 if ( ! isset( $recipients[ $key ] ) ) continue;
                 $r = $recipients[ $key ];
 
+                // Serverzijde dezelfde grens als in de UI: alleen de rijen die bij dit type horen.
+                $rows = arrahma_rows_for_email_type( $r['rows'], $type );
+                if ( empty( $rows ) ) { $overgesl++; continue; }
+
                 if ( $type === 'ouderavond' ) {
-                    arrahma_send_ouderavond_email( $r['email'], $r['names'] );
+                    arrahma_send_ouderavond_email( $r['email'], arrahma_names_from_rows( $rows ) );
+                } elseif ( $type === 'indeling' ) {
+                    arrahma_send_indeling_email( $r['email'], $rows );
                 } else {
-                    arrahma_send_confirmation_email( $r['email'], $r['rows'] );
+                    arrahma_send_confirmation_email( $r['email'], $rows );
                 }
                 $sent++;
             }
-            $result = [ 'sent' => $sent, 'label' => $types[ $type ] ];
+            $result = [ 'sent' => $sent, 'label' => $types[ $type ], 'overgeslagen' => $overgesl ];
         }
     }
 
@@ -1662,6 +1923,8 @@ function arrahma_emails_page() {
 
             if ( $test_type === 'ouderavond' ) {
                 arrahma_send_ouderavond_email( $test_email, $names, '[TEST] ' );
+            } elseif ( $test_type === 'indeling' ) {
+                arrahma_send_indeling_email( $test_email, [ $sample ], '[TEST] ' );
             } else {
                 arrahma_send_confirmation_email( $test_email, [ $sample ], '[TEST] ' );
             }
@@ -1679,7 +1942,10 @@ function arrahma_emails_page() {
         <div class="notice notice-error is-dismissible"><p><?= esc_html( $result['error'] ) ?></p></div>
       <?php elseif ( isset( $result['sent'] ) ) : ?>
         <div class="notice notice-success is-dismissible"><p>
-          <?= esc_html( $result['label'] ) ?> verstuurd naar <?= (int) $result['sent'] ?> ouder<?= $result['sent'] !== 1 ? 's' : '' ?>.
+          <?= esc_html( $result['label'] ) ?> verstuurd naar <?= (int) $result['sent'] ?> ontvanger<?= $result['sent'] !== 1 ? 's' : '' ?>.
+          <?php if ( ! empty( $result['overgeslagen'] ) ) : ?>
+            <?= (int) $result['overgeslagen'] ?> overgeslagen: geen inschrijving in de doelgroep waarvoor deze e-mail bedoeld is.
+          <?php endif; ?>
         </p></div>
       <?php endif; ?>
 
@@ -1699,13 +1965,16 @@ function arrahma_emails_page() {
         <form method="post" style="display:flex;gap:.6rem;flex-wrap:wrap;align-items:center">
           <?php wp_nonce_field( 'arrahma_send_test', '_wpnonce_test' ); ?>
           <input type="email" name="test_email" required placeholder="jouw@email.nl" class="regular-text" style="min-width:220px">
-          <button type="submit" name="arrahma_send_test" value="ouderavond" class="button">Test: Ouderavond-uitnodiging</button>
-          <button type="submit" name="arrahma_send_test" value="bevestiging" class="button">Test: Bevestiging inschrijving</button>
+          <?php foreach ( $email_types as $val => $meta ) : ?>
+            <button type="submit" name="arrahma_send_test" value="<?= esc_attr( $val ) ?>" class="button">Test: <?= esc_html( $meta['label'] ) ?></button>
+          <?php endforeach; ?>
         </form>
       </div>
 
       <p style="color:#555;max-width:680px">
-        Verstuurt één e-mail per geselecteerde ouder (gegroepeerd op e-mailadres, dus een gezin krijgt één e-mail voor al hun kinderen).
+        Verstuurt één e-mail per geselecteerde ontvanger (gegroepeerd op e-mailadres, dus een gezin krijgt één e-mail voor al hun kinderen).
+        De lijst bevat iedereen met een e-mailadres, dus ook jongeren en volwassenen die zichzelf hebben ingeschreven —
+        per e-mailtype worden de ontvangers die er niet voor in aanmerking komen grijs en niet aanvinkbaar.
         Er wordt niet bijgehouden wie al een e-mail kreeg — opnieuw versturen stuurt de e-mail nogmaals naar iedereen die je aanvinkt.
       </p>
 
@@ -1718,16 +1987,21 @@ function arrahma_emails_page() {
 
           <h2 style="font-size:.8rem;text-transform:uppercase;letter-spacing:.08em;color:#2d3a4a;margin:1.5rem 0 .5rem">Welke e-mail?</h2>
           <fieldset style="margin-bottom:1.25rem">
-            <label style="display:block;margin-bottom:.4rem">
-              <input type="radio" name="email_type" value="ouderavond" data-label="Ouderavond-uitnodiging" checked>
-              <strong>Ouderavond-uitnodiging</strong>
-              <span style="color:#888">— link naar het ouderavond-formulier, vooraf ingevuld met e-mailadres en kindnamen.</span>
-            </label>
-            <label style="display:block">
-              <input type="radio" name="email_type" value="bevestiging" data-label="Bevestiging inschrijving">
-              <strong>Bevestiging inschrijving</strong>
-              <span style="color:#888">— overzicht van de ingevulde gegevens, zodat ouders ze kunnen controleren.</span>
-            </label>
+            <?php $eerste = true; foreach ( $email_types as $val => $meta ) :
+                $cats     = $meta['categorieen'];
+                $cat_tekst = $cats === null
+                    ? ''
+                    : ' Alleen voor ' . implode( ', ', array_map(
+                        function ( $c ) { return arrahma_category_labels()[ $c ] ?? $c; },
+                        $cats
+                      ) ) . '.';
+            ?>
+              <label style="display:block;margin-bottom:.4rem">
+                <input type="radio" name="email_type" value="<?= esc_attr( $val ) ?>" data-label="<?= esc_attr( $meta['label'] ) ?>" <?= checked( $eerste, true, false ) ?>>
+                <strong><?= esc_html( $meta['label'] ) ?></strong>
+                <span style="color:#888">— <?= esc_html( $meta['omschrijving'] ) ?><?= esc_html( $cat_tekst ) ?></span>
+              </label>
+            <?php $eerste = false; endforeach; ?>
           </fieldset>
 
           <h2 style="font-size:.8rem;text-transform:uppercase;letter-spacing:.08em;color:#2d3a4a;margin:1.5rem 0 .5rem">Naar wie?</h2>
@@ -1738,18 +2012,30 @@ function arrahma_emails_page() {
                   <input type="checkbox" id="arrahma-cb-all" title="Alles selecteren">
                 </td>
                 <th>E-mailadres</th>
-                <th>Kind(eren)</th>
-                <th style="width:80px">Aantal</th>
+                <th>Ingeschreven</th>
+                <th style="width:230px">Doelgroep(en)</th>
+                <th style="width:70px">Aantal</th>
               </tr>
             </thead>
             <tbody>
-              <?php foreach ( $recipients as $key => $r ) : ?>
-                <tr>
+              <?php
+                $cat_labels = arrahma_category_labels();
+                foreach ( $recipients as $key => $r ) :
+                  $types_ok = arrahma_types_for_recipient( $r );
+                  $cats     = array_values( array_unique( array_map(
+                      function ( $row ) use ( $cat_labels ) {
+                          return $cat_labels[ $row->inschrijving_voor ] ?? $row->inschrijving_voor;
+                      },
+                      $r['rows']
+                  ) ) );
+              ?>
+                <tr data-types="<?= esc_attr( implode( ' ', $types_ok ) ) ?>">
                   <th scope="row" class="check-column" style="padding:8px 0 8px 10px">
                     <input type="checkbox" name="recipients[]" value="<?= esc_attr( $key ) ?>">
                   </th>
                   <td><?= esc_html( $r['email'] ) ?></td>
                   <td><?= esc_html( implode( ', ', $r['names'] ) ) ?></td>
+                  <td style="color:#666;font-size:.85em"><?= esc_html( implode( ', ', $cats ) ) ?></td>
                   <td><?= count( $r['names'] ) ?></td>
                 </tr>
               <?php endforeach; ?>
@@ -1774,37 +2060,61 @@ function arrahma_emails_page() {
 
           function boxes() { return form.querySelectorAll('input[name="recipients[]"]'); }
           function checkedBoxes() { return form.querySelectorAll('input[name="recipients[]"]:checked'); }
+          function enabledBoxes() { return form.querySelectorAll('input[name="recipients[]"]:not(:disabled)'); }
+          function huidigType() {
+            var t = form.querySelector('input[name="email_type"]:checked');
+            return t ? t.value : '';
+          }
+
+          // Ontvangers zonder inschrijving in de gekozen doelgroep gaan op slot: wel zichtbaar
+          // (je wilt de hele lijst kunnen overzien), maar grijs, uitgevinkt en niet aan te vinken.
+          function pasTypeToe() {
+            var type = huidigType();
+            boxes().forEach(function (cb) {
+              var rij  = cb.closest('tr');
+              var kan  = (rij.dataset.types || '').split(' ').indexOf(type) !== -1;
+              cb.disabled = !kan;
+              if (!kan) cb.checked = false;
+              rij.style.opacity = kan ? '' : '.45';
+              rij.title = kan ? '' : 'Geen inschrijving in de doelgroep waarvoor deze e-mail bedoeld is.';
+            });
+            updateCount();
+          }
 
           function updateCount() {
             var n = checkedBoxes().length;
-            counter.textContent = n + ' geselecteerd';
-            all.checked = (n > 0 && n === boxes().length);
-            all.indeterminate = (n > 0 && n < boxes().length);
+            var beschikbaar = enabledBoxes().length;
+            counter.textContent = n + ' van ' + beschikbaar + ' geselecteerd';
+            all.checked = (n > 0 && n === beschikbaar);
+            all.indeterminate = (n > 0 && n < beschikbaar);
           }
 
           all.addEventListener('change', function () {
             var state = this.checked;
-            boxes().forEach(function (cb) { cb.checked = state; });
+            enabledBoxes().forEach(function (cb) { cb.checked = state; });
             updateCount();
           });
 
           boxes().forEach(function (cb) { cb.addEventListener('change', updateCount); });
+          form.querySelectorAll('input[name="email_type"]').forEach(function (r) {
+            r.addEventListener('change', pasTypeToe);
+          });
 
           form.addEventListener('submit', function (e) {
             var n = checkedBoxes().length;
             if (!n) {
               e.preventDefault();
-              alert('Selecteer minimaal één ouder.');
+              alert('Selecteer minimaal één ontvanger.');
               return;
             }
             var type = form.querySelector('input[name="email_type"]:checked');
             var label = type ? type.dataset.label : 'e-mail';
-            if (!confirm('Verstuur "' + label + '" naar ' + n + ' ouder(s)? Dit kan niet ongedaan worden gemaakt.')) {
+            if (!confirm('Verstuur "' + label + '" naar ' + n + ' ontvanger(s)? Dit kan niet ongedaan worden gemaakt.')) {
               e.preventDefault();
             }
           });
 
-          updateCount();
+          pasTypeToe();
         })();
         </script>
 
