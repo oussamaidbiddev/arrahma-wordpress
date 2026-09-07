@@ -1172,8 +1172,15 @@ function arrahma_email_type_categories( string $type ): ?array {
  * ingeschreven. Daarom filteren we per rij en niet per ontvanger: hij krijgt de ouderavond-mail
  * met alleen zijn kinderen erin.
  */
-function arrahma_rows_for_email_type( array $rows, string $type ): array {
+function arrahma_rows_for_email_type( array $rows, string $type, string $doelgroep = '' ): array {
     $categorieen = arrahma_email_type_categories( $type );
+
+    // Handmatig gekozen doelgroep versmalt de selectie verder. Zo kun je bij één e-mailadres met
+    // twee kinderen én een volwassene alleen de kinderen mailen, zonder de volwassene mee te sturen.
+    if ( $doelgroep !== '' ) {
+        $categorieen = $categorieen === null ? [ $doelgroep ] : array_intersect( $categorieen, [ $doelgroep ] );
+    }
+
     if ( $categorieen === null ) return array_values( $rows );
 
     return array_values( array_filter(
@@ -1184,15 +1191,14 @@ function arrahma_rows_for_email_type( array $rows, string $type ): array {
     ) );
 }
 
-/** Welke e-mailtypes kan deze ontvanger krijgen? */
-function arrahma_types_for_recipient( array $recipient ): array {
-    $types = [];
-    foreach ( array_keys( arrahma_email_types() ) as $type ) {
-        if ( ! empty( arrahma_rows_for_email_type( $recipient['rows'], $type ) ) ) {
-            $types[] = $type;
-        }
+/** Aantal inschrijvingen per doelgroep voor één ontvanger, bijv. [ 'kinderen' => 2 ]. */
+function arrahma_category_counts_for_recipient( array $recipient ): array {
+    $counts = [];
+    foreach ( $recipient['rows'] as $row ) {
+        $cat = $row->inschrijving_voor;
+        $counts[ $cat ] = ( $counts[ $cat ] ?? 0 ) + 1;
     }
-    return $types;
+    return $counts;
 }
 
 /** Bouwt een vooraf ingevulde Google Form-link voor één ouder. */
@@ -1972,8 +1978,13 @@ function arrahma_emails_page() {
         isset( $_POST['arrahma_send_emails'], $_POST['_wpnonce'] ) &&
         wp_verify_nonce( $_POST['_wpnonce'], 'arrahma_send_emails' )
     ) {
-        $type     = sanitize_text_field( wp_unslash( $_POST['email_type'] ?? '' ) );
-        $selected = array_map( 'sanitize_text_field', (array) ( $_POST['recipients'] ?? [] ) );
+        $type      = sanitize_text_field( wp_unslash( $_POST['email_type'] ?? '' ) );
+        $doelgroep = sanitize_text_field( wp_unslash( $_POST['doelgroep'] ?? '' ) );
+        $selected  = array_map( 'sanitize_text_field', (array) ( $_POST['recipients'] ?? [] ) );
+
+        if ( $doelgroep !== '' && ! in_array( $doelgroep, arrahma_active_categories(), true ) ) {
+            $doelgroep = '';
+        }
 
         if ( ! isset( $types[ $type ] ) ) {
             $result = [ 'error' => 'Kies een geldig e-mailtype.' ];
@@ -1981,14 +1992,15 @@ function arrahma_emails_page() {
             $result = [ 'error' => 'Selecteer minimaal één ontvanger.' ];
         } else {
             $sent      = 0;
-            $overgesl  = 0; // ontvangers zonder rijen in dit e-mailtype
+            $overgesl  = 0; // ontvangers zonder rijen in dit e-mailtype / deze doelgroep
             foreach ( $selected as $key ) {
                 $key = strtolower( $key );
                 if ( ! isset( $recipients[ $key ] ) ) continue;
                 $r = $recipients[ $key ];
 
-                // Serverzijde dezelfde grens als in de UI: alleen de rijen die bij dit type horen.
-                $rows = arrahma_rows_for_email_type( $r['rows'], $type );
+                // Serverzijde dezelfde grens als in de UI: alleen de rijen die bij dit type
+                // én de gekozen doelgroep horen.
+                $rows = arrahma_rows_for_email_type( $r['rows'], $type, $doelgroep );
                 if ( empty( $rows ) ) { $overgesl++; continue; }
 
                 if ( $type === 'ouderavond' ) {
@@ -2000,7 +2012,12 @@ function arrahma_emails_page() {
                 }
                 $sent++;
             }
-            $result = [ 'sent' => $sent, 'label' => $types[ $type ], 'overgeslagen' => $overgesl ];
+            $result = [
+                'sent'         => $sent,
+                'label'        => $types[ $type ],
+                'overgeslagen' => $overgesl,
+                'doelgroep'    => $doelgroep !== '' ? ( arrahma_category_labels()[ $doelgroep ] ?? $doelgroep ) : '',
+            ];
         }
     }
 
@@ -2042,9 +2059,10 @@ function arrahma_emails_page() {
         <div class="notice notice-error is-dismissible"><p><?= esc_html( $result['error'] ) ?></p></div>
       <?php elseif ( isset( $result['sent'] ) ) : ?>
         <div class="notice notice-success is-dismissible"><p>
-          <?= esc_html( $result['label'] ) ?> verstuurd naar <?= (int) $result['sent'] ?> ontvanger<?= $result['sent'] !== 1 ? 's' : '' ?>.
+          <?= esc_html( $result['label'] ) ?><?php if ( ! empty( $result['doelgroep'] ) ) : ?> (alleen <?= esc_html( $result['doelgroep'] ) ?>)<?php endif; ?>
+          verstuurd naar <?= (int) $result['sent'] ?> ontvanger<?= $result['sent'] !== 1 ? 's' : '' ?>.
           <?php if ( ! empty( $result['overgeslagen'] ) ) : ?>
-            <?= (int) $result['overgeslagen'] ?> overgeslagen: geen inschrijving in de doelgroep waarvoor deze e-mail bedoeld is.
+            <?= (int) $result['overgeslagen'] ?> overgeslagen: geen inschrijving in de gekozen doelgroep.
           <?php endif; ?>
         </p></div>
       <?php endif; ?>
@@ -2087,6 +2105,11 @@ function arrahma_emails_page() {
 
           <h2 style="font-size:.8rem;text-transform:uppercase;letter-spacing:.08em;color:#2d3a4a;margin:1.5rem 0 .5rem">Welke e-mail?</h2>
           <fieldset style="margin-bottom:1.25rem">
+            <?php
+              // Type -> toegestane doelgroepen, zodat de JS dezelfde grens kan trekken als de server.
+              $type_cats = [];
+              foreach ( $email_types as $val => $meta ) { $type_cats[ $val ] = $meta['categorieen']; }
+            ?>
             <?php $eerste = true; foreach ( $email_types as $val => $meta ) :
                 $cats     = $meta['categorieen'];
                 $cat_tekst = $cats === null
@@ -2103,6 +2126,19 @@ function arrahma_emails_page() {
               </label>
             <?php $eerste = false; endforeach; ?>
           </fieldset>
+
+          <h2 style="font-size:.8rem;text-transform:uppercase;letter-spacing:.08em;color:#2d3a4a;margin:1.5rem 0 .5rem">Welke doelgroep?</h2>
+          <p style="color:#888;font-size:.85rem;margin:0 0 .5rem;max-width:680px">
+            Beperkt de e-mail tot één doelgroep. Staan er op één e-mailadres bijvoorbeeld twee kinderen én een
+            volwassene, dan stuur je met "Kinderen" alleen de plaatsing van de twee kinderen — de volwassene
+            staat er dan niet in en krijgt zijn eigen e-mail wanneer jij die verstuurt.
+          </p>
+          <select name="doelgroep" id="arrahma-doelgroep" style="min-width:280px;margin-bottom:1.25rem">
+            <option value="">Alle doelgroepen — alles in één e-mail</option>
+            <?php foreach ( arrahma_active_categories() as $cat ) : ?>
+              <option value="<?= esc_attr( $cat ) ?>"><?= esc_html( arrahma_category_labels()[ $cat ] ?? $cat ) ?></option>
+            <?php endforeach; ?>
+          </select>
 
           <h2 style="font-size:.8rem;text-transform:uppercase;letter-spacing:.08em;color:#2d3a4a;margin:1.5rem 0 .5rem">Naar wie?</h2>
           <table class="wp-list-table widefat fixed striped" style="max-width:800px;border-radius:8px;overflow:hidden">
@@ -2121,22 +2157,20 @@ function arrahma_emails_page() {
               <?php
                 $cat_labels = arrahma_category_labels();
                 foreach ( $recipients as $key => $r ) :
-                  $types_ok = arrahma_types_for_recipient( $r );
-                  $cats     = array_values( array_unique( array_map(
-                      function ( $row ) use ( $cat_labels ) {
-                          return $cat_labels[ $row->inschrijving_voor ] ?? $row->inschrijving_voor;
-                      },
-                      $r['rows']
-                  ) ) );
+                  $cat_counts = arrahma_category_counts_for_recipient( $r );
+                  $cats       = array_map(
+                      function ( $cat ) use ( $cat_labels ) { return $cat_labels[ $cat ] ?? $cat; },
+                      array_keys( $cat_counts )
+                  );
               ?>
-                <tr data-types="<?= esc_attr( implode( ' ', $types_ok ) ) ?>">
+                <tr data-counts="<?= esc_attr( wp_json_encode( $cat_counts ) ) ?>">
                   <th scope="row" class="check-column" style="padding:8px 0 8px 10px">
                     <input type="checkbox" name="recipients[]" value="<?= esc_attr( $key ) ?>">
                   </th>
                   <td><?= esc_html( $r['email'] ) ?></td>
                   <td><?= esc_html( implode( ', ', $r['names'] ) ) ?></td>
                   <td style="color:#666;font-size:.85em"><?= esc_html( implode( ', ', $cats ) ) ?></td>
-                  <td><?= count( $r['names'] ) ?></td>
+                  <td class="arrahma-aantal"><?= count( $r['names'] ) ?></td>
                 </tr>
               <?php endforeach; ?>
             </tbody>
@@ -2155,8 +2189,12 @@ function arrahma_emails_page() {
           var form = document.getElementById('arrahma-email-form');
           if (!form) return;
 
-          var all     = document.getElementById('arrahma-cb-all');
-          var counter = document.getElementById('arrahma-selected-count');
+          var all       = document.getElementById('arrahma-cb-all');
+          var counter   = document.getElementById('arrahma-selected-count');
+          var doelgroep = document.getElementById('arrahma-doelgroep');
+
+          // Per e-mailtype de toegestane doelgroepen; null = alle. Zelfde bron als de server.
+          var TYPE_CATS = <?php echo wp_json_encode( $type_cats ); ?>;
 
           function boxes() { return form.querySelectorAll('input[name="recipients[]"]'); }
           function checkedBoxes() { return form.querySelectorAll('input[name="recipients[]"]:checked'); }
@@ -2166,17 +2204,41 @@ function arrahma_emails_page() {
             return t ? t.value : '';
           }
 
+          /** De doelgroepen die overblijven na het e-mailtype én de handmatige doelgroepkeuze. */
+          function actieveCategorieen() {
+            var vanType = TYPE_CATS[huidigType()] || null;   // null = alle
+            var gekozen = doelgroep && doelgroep.value ? doelgroep.value : '';
+            if (!gekozen) return vanType;                     // null of de lijst van het type
+            if (!vanType) return [gekozen];
+            return vanType.indexOf(gekozen) !== -1 ? [gekozen] : [];
+          }
+
+          /** Hoeveel inschrijvingen van deze ontvanger vallen binnen de actieve doelgroepen? */
+          function aantalVoorRij(rij, cats) {
+            var counts = {};
+            try { counts = JSON.parse(rij.dataset.counts || '{}'); } catch (e) { counts = {}; }
+            return Object.keys(counts).reduce(function (som, cat) {
+              return som + ((cats === null || cats.indexOf(cat) !== -1) ? counts[cat] : 0);
+            }, 0);
+          }
+
           // Ontvangers zonder inschrijving in de gekozen doelgroep gaan op slot: wel zichtbaar
           // (je wilt de hele lijst kunnen overzien), maar grijs, uitgevinkt en niet aan te vinken.
+          // Het aantal toont wat er daadwerkelijk in de e-mail komt, niet het totaal op dat adres.
           function pasTypeToe() {
-            var type = huidigType();
+            var cats = actieveCategorieen();
             boxes().forEach(function (cb) {
-              var rij  = cb.closest('tr');
-              var kan  = (rij.dataset.types || '').split(' ').indexOf(type) !== -1;
+              var rij    = cb.closest('tr');
+              var aantal = aantalVoorRij(rij, cats);
+              var kan    = aantal > 0;
+
               cb.disabled = !kan;
               if (!kan) cb.checked = false;
               rij.style.opacity = kan ? '' : '.45';
-              rij.title = kan ? '' : 'Geen inschrijving in de doelgroep waarvoor deze e-mail bedoeld is.';
+              rij.title = kan ? '' : 'Geen inschrijving in de gekozen doelgroep.';
+
+              var cel = rij.querySelector('.arrahma-aantal');
+              if (cel) cel.textContent = aantal;
             });
             updateCount();
           }
@@ -2199,6 +2261,7 @@ function arrahma_emails_page() {
           form.querySelectorAll('input[name="email_type"]').forEach(function (r) {
             r.addEventListener('change', pasTypeToe);
           });
+          if (doelgroep) doelgroep.addEventListener('change', pasTypeToe);
 
           form.addEventListener('submit', function (e) {
             var n = checkedBoxes().length;
@@ -2207,9 +2270,12 @@ function arrahma_emails_page() {
               alert('Selecteer minimaal één ontvanger.');
               return;
             }
-            var type = form.querySelector('input[name="email_type"]:checked');
+            var type  = form.querySelector('input[name="email_type"]:checked');
             var label = type ? type.dataset.label : 'e-mail';
-            if (!confirm('Verstuur "' + label + '" naar ' + n + ' ontvanger(s)? Dit kan niet ongedaan worden gemaakt.')) {
+            var dg    = doelgroep && doelgroep.value
+                        ? ' (alleen ' + doelgroep.options[doelgroep.selectedIndex].text + ')'
+                        : '';
+            if (!confirm('Verstuur "' + label + '"' + dg + ' naar ' + n + ' ontvanger(s)? Dit kan niet ongedaan worden gemaakt.')) {
               e.preventDefault();
             }
           });
