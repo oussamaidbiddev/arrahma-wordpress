@@ -2,14 +2,22 @@
 /**
  * Plugin Name: Arrahma Inschrijvingen
  * Description: Slaat lesaanmeldingen op in de database en toont ze in een overzichtspagina met CSV-export.
- * Version:     1.12.0
+ * Version:     1.13.0
  * Author:      Vereniging Arrahma
  */
 
 if ( ! defined( 'ABSPATH' ) ) exit;
 
 define( 'ARRAHMA_TABLE',       'arrahma_inschrijvingen' );
-define( 'ARRAHMA_VERSION',     '1.12.0' );
+
+// Verzendlog: wie welke e-mail wanneer kreeg. Maakt hervatten na een onderbroken verzending
+// mogelijk en voorkomt dubbele e-mails.
+define( 'ARRAHMA_LOG_TABLE',   'arrahma_email_log' );
+
+// Aantal e-mails per HTTP-verzoek tijdens het verzenden. Klein genoeg om ruim binnen een
+// krappe max_execution_time (30s) te blijven, ook als een SMTP-verbinding traag is.
+define( 'ARRAHMA_BATCH_SIZE',  10 );
+define( 'ARRAHMA_VERSION',     '1.13.0' );
 
 // Standaardcapaciteit. De capaciteit is per lesblok/lesgroep in te stellen via
 // Inschrijvingen → Instellingen; deze waarden gelden zolang daar niets is opgeslagen.
@@ -83,8 +91,22 @@ function arrahma_create_table() {
         PRIMARY KEY (id)
     ) {$charset};";
 
+    $log_table = $wpdb->prefix . ARRAHMA_LOG_TABLE;
+    $log_sql   = "CREATE TABLE {$log_table} (
+        id           BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+        email        VARCHAR(150) NOT NULL,
+        email_type   VARCHAR(30)  NOT NULL,
+        doelgroep    VARCHAR(30)  NOT NULL DEFAULT '',
+        aantal       SMALLINT UNSIGNED NOT NULL DEFAULT 0,
+        gelukt       TINYINT(1)   NOT NULL DEFAULT 1,
+        verzonden_op DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY  (id),
+        KEY type_email (email_type, email(100))
+    ) {$charset};";
+
     require_once ABSPATH . 'wp-admin/includes/upgrade.php';
     dbDelta( $sql );
+    dbDelta( $log_sql );
 
     update_option( 'arrahma_db_version', ARRAHMA_VERSION );
 }
@@ -927,8 +949,8 @@ function arrahma_confirmation_details_html( array $rows, string $soort = 'zelf' 
  * Werkt voor één inschrijving én voor een gezin (meerdere rijen, één ouder).
  * Wordt gebruikt bij inschrijving én bij handmatig opnieuw versturen vanuit de admin.
  */
-function arrahma_send_confirmation_email( string $email, array $rows, string $subject_prefix = '' ): void {
-    if ( empty( $rows ) || ! $email ) return;
+function arrahma_send_confirmation_email( string $email, array $rows, string $subject_prefix = '' ): bool {
+    if ( empty( $rows ) || ! $email ) return false;
 
     $rows  = array_values( $rows );
     $first = arrahma_row_to_array( $rows[0] );
@@ -981,7 +1003,7 @@ function arrahma_send_confirmation_email( string $email, array $rows, string $su
         'From: Vereniging Arrahma <oudercomite@vereniging-arrahma.nl>',
     ];
 
-    wp_mail( $email, $subject_prefix . 'Bevestiging inschrijving — Vereniging Arrahma', arrahma_email_wrap( $inner_html ), $headers );
+    return wp_mail( $email, $subject_prefix . 'Bevestiging inschrijving — Vereniging Arrahma', arrahma_email_wrap( $inner_html ), $headers );
 }
 
 /**
@@ -995,8 +1017,8 @@ function arrahma_send_confirmation_email( string $email, array $rows, string $su
  * 'gemengd' (kinderen én een volwassene op één adres) krijgt de oudertekst: er zitten kinderen
  * bij, dus de ouderbijeenkomst geldt wel degelijk voor die lezer.
  */
-function arrahma_send_indeling_email( string $email, array $rows, string $subject_prefix = '', string $doelgroep = '' ): void {
-    if ( empty( $rows ) || ! $email ) return;
+function arrahma_send_indeling_email( string $email, array $rows, string $subject_prefix = '', string $doelgroep = '' ): bool {
+    if ( empty( $rows ) || ! $email ) return false;
 
     $rows  = array_values( $rows );
     $meer  = count( $rows ) > 1;
@@ -1143,7 +1165,7 @@ function arrahma_send_indeling_email( string $email, array $rows, string $subjec
     }
     $onderwerp .= ' — Vereniging Arrahma';
 
-    wp_mail( $email, $subject_prefix . $onderwerp, arrahma_email_wrap( $inner_html ), $headers );
+    return wp_mail( $email, $subject_prefix . $onderwerp, arrahma_email_wrap( $inner_html ), $headers );
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -1240,6 +1262,133 @@ function arrahma_rows_for_email_type( array $rows, string $type, string $doelgro
     ) );
 }
 
+// ─────────────────────────────────────────────────────────────
+// VERZENDLOG + BATCHGEWIJS VERSTUREN
+// ─────────────────────────────────────────────────────────────
+
+function arrahma_log_table(): string {
+    global $wpdb;
+    return $wpdb->prefix . ARRAHMA_LOG_TABLE;
+}
+
+/** Legt één verzendpoging vast — ook een mislukte, zodat je die gericht kunt herhalen. */
+function arrahma_log_email( string $email, string $type, string $doelgroep, int $aantal, bool $gelukt ): void {
+    global $wpdb;
+    $wpdb->insert(
+        arrahma_log_table(),
+        [
+            'email'      => $email,
+            'email_type' => $type,
+            'doelgroep'  => $doelgroep,
+            'aantal'     => $aantal,
+            'gelukt'     => $gelukt ? 1 : 0,
+        ],
+        [ '%s', '%s', '%s', '%d', '%d' ]
+    );
+
+    // Cache van arrahma_sent_log() ongeldig maken: er is zojuist iets bijgekomen.
+    arrahma_sent_log( '', true );
+}
+
+/**
+ * Wanneer kreeg elk adres dit e-mailtype voor het laatst met succes?
+ * Retourneert [ 'ouder@voorbeeld.nl' => '2026-09-07 14:21:03', ... ].
+ */
+function arrahma_sent_log( string $type, bool $leeg_cache = false ): array {
+    global $wpdb;
+
+    // Per request cachen: de verzendlus vraagt dit voor elke ontvanger op. De cache wordt geleegd
+    // zodra er iets in het log wordt geschreven, zodat lezen na versturen nooit verouderd is.
+    static $cache = [];
+    if ( $leeg_cache ) { $cache = []; return []; }
+    if ( isset( $cache[ $type ] ) ) return $cache[ $type ];
+
+    $rows = $wpdb->get_results( $wpdb->prepare(
+        'SELECT email, MAX(verzonden_op) AS laatst FROM ' . arrahma_log_table()
+        . ' WHERE email_type = %s AND gelukt = 1 GROUP BY email',
+        $type
+    ) );
+
+    $log = [];
+    foreach ( (array) $rows as $row ) {
+        $log[ strtolower( $row->email ) ] = $row->laatst;
+    }
+
+    $cache[ $type ] = $log;
+    return $log;
+}
+
+/**
+ * Verstuurt één e-mail aan één ontvanger en legt het resultaat vast.
+ *
+ * Gedeeld door het batchgewijze (AJAX) pad en het gewone formulier-pad, zodat beide precies
+ * dezelfde regels volgen. Retourneert 'verstuurd', 'overgeslagen' of 'mislukt'.
+ */
+function arrahma_send_to_recipient( array $recipient, string $type, string $doelgroep, bool $skip_sent ): string {
+    $rows = arrahma_rows_for_email_type( $recipient['rows'], $type, $doelgroep );
+    if ( empty( $rows ) ) return 'overgeslagen';
+
+    if ( $skip_sent && isset( arrahma_sent_log( $type )[ strtolower( $recipient['email'] ) ] ) ) {
+        return 'overgeslagen';
+    }
+
+    if ( $type === 'ouderavond' ) {
+        $ok = arrahma_send_ouderavond_email( $recipient['email'], arrahma_names_from_rows( $rows ) );
+    } elseif ( $type === 'indeling' ) {
+        $ok = arrahma_send_indeling_email( $recipient['email'], $rows, '', $doelgroep );
+    } else {
+        $ok = arrahma_send_confirmation_email( $recipient['email'], $rows );
+    }
+
+    arrahma_log_email( $recipient['email'], $type, $doelgroep, count( $rows ), $ok );
+    return $ok ? 'verstuurd' : 'mislukt';
+}
+
+/**
+ * Verstuurt één batch. De browser roept dit herhaald aan, telkens met de volgende ARRAHMA_BATCH_SIZE
+ * ontvangers, zodat er nooit één verzoek is dat langer duurt dan een krappe max_execution_time.
+ */
+add_action( 'wp_ajax_arrahma_send_batch', 'arrahma_ajax_send_batch' );
+
+function arrahma_ajax_send_batch(): void {
+    if ( ! current_user_can( 'manage_options' ) ) {
+        wp_send_json_error( [ 'message' => 'Geen rechten.' ], 403 );
+    }
+    check_ajax_referer( 'arrahma_send_emails' );
+
+    $type      = sanitize_text_field( wp_unslash( $_POST['email_type'] ?? '' ) );
+    $doelgroep = sanitize_text_field( wp_unslash( $_POST['doelgroep'] ?? '' ) );
+    $skip_sent = ! empty( $_POST['skip_sent'] );
+    $keys      = array_map( 'sanitize_text_field', (array) ( $_POST['recipients'] ?? [] ) );
+
+    if ( ! isset( arrahma_email_types()[ $type ] ) ) {
+        wp_send_json_error( [ 'message' => 'Onbekend e-mailtype.' ], 400 );
+    }
+    if ( $doelgroep !== '' && ! in_array( $doelgroep, arrahma_active_categories(), true ) ) {
+        $doelgroep = '';
+    }
+    if ( count( $keys ) > ARRAHMA_BATCH_SIZE ) {
+        wp_send_json_error( [ 'message' => 'Batch is te groot.' ], 400 );
+    }
+
+    $recipients = arrahma_email_recipients();
+    $resultaat  = [ 'verstuurd' => 0, 'overgeslagen' => 0, 'mislukt' => [] ];
+
+    foreach ( $keys as $key ) {
+        $key = strtolower( $key );
+        if ( ! isset( $recipients[ $key ] ) ) { $resultaat['overgeslagen']++; continue; }
+
+        $status = arrahma_send_to_recipient( $recipients[ $key ], $type, $doelgroep, $skip_sent );
+        if ( $status === 'mislukt' ) {
+            $resultaat['mislukt'][] = $recipients[ $key ]['email'];
+        } else {
+            $resultaat[ $status ]++;
+        }
+    }
+
+    wp_send_json_success( $resultaat );
+}
+
 /** Aantal inschrijvingen per doelgroep voor één ontvanger, bijv. [ 'kinderen' => 2 ]. */
 function arrahma_category_counts_for_recipient( array $recipient ): array {
     $counts = [];
@@ -1258,7 +1407,7 @@ function arrahma_ouderavond_prefill_url( string $email, array $names ): string {
         . '&entry.' . ARRAHMA_OUDERAVOND_ENTRY_KIND  . '=' . rawurlencode( implode( ', ', $names ) );
 }
 
-function arrahma_send_ouderavond_email( string $email, array $names, string $subject_prefix = '' ): void {
+function arrahma_send_ouderavond_email( string $email, array $names, string $subject_prefix = '' ): bool {
     $namen_html = esc_html( implode( ', ', $names ) );
     $form_url   = arrahma_ouderavond_prefill_url( $email, $names );
 
@@ -1296,7 +1445,7 @@ function arrahma_send_ouderavond_email( string $email, array $names, string $sub
         'From: Vereniging Arrahma <oudercomite@vereniging-arrahma.nl>',
     ];
 
-    wp_mail( $email, $subject_prefix . 'Ouderavond Vereniging Arrahma — kies je moment', arrahma_email_wrap( $inner_html ), $headers );
+    return wp_mail( $email, $subject_prefix . 'Ouderavond Vereniging Arrahma — kies je moment', arrahma_email_wrap( $inner_html ), $headers );
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -2040,31 +2189,27 @@ function arrahma_emails_page() {
         } elseif ( empty( $selected ) ) {
             $result = [ 'error' => 'Selecteer minimaal één ontvanger.' ];
         } else {
+            // Terugvalpad zonder JavaScript. Normaal verstuurt de browser batchgewijs via AJAX;
+            // dit pad doet alles in één verzoek en kan dus vastlopen op max_execution_time.
+            // Het volgt wel exact dezelfde regels, inclusief overslaan en loggen.
+            $skip_sent = ! empty( $_POST['skip_sent'] );
             $sent      = 0;
-            $overgesl  = 0; // ontvangers zonder rijen in dit e-mailtype / deze doelgroep
+            $overgesl  = 0;
+            $mislukt   = 0;
             foreach ( $selected as $key ) {
                 $key = strtolower( $key );
                 if ( ! isset( $recipients[ $key ] ) ) continue;
-                $r = $recipients[ $key ];
 
-                // Serverzijde dezelfde grens als in de UI: alleen de rijen die bij dit type
-                // én de gekozen doelgroep horen.
-                $rows = arrahma_rows_for_email_type( $r['rows'], $type, $doelgroep );
-                if ( empty( $rows ) ) { $overgesl++; continue; }
-
-                if ( $type === 'ouderavond' ) {
-                    arrahma_send_ouderavond_email( $r['email'], arrahma_names_from_rows( $rows ) );
-                } elseif ( $type === 'indeling' ) {
-                    arrahma_send_indeling_email( $r['email'], $rows, '', $doelgroep );
-                } else {
-                    arrahma_send_confirmation_email( $r['email'], $rows );
-                }
-                $sent++;
+                $status = arrahma_send_to_recipient( $recipients[ $key ], $type, $doelgroep, $skip_sent );
+                if ( $status === 'verstuurd' )    $sent++;
+                elseif ( $status === 'mislukt' )  $mislukt++;
+                else                              $overgesl++;
             }
             $result = [
                 'sent'         => $sent,
                 'label'        => $types[ $type ],
                 'overgeslagen' => $overgesl,
+                'mislukt'      => $mislukt,
                 'doelgroep'    => $doelgroep !== '' ? ( arrahma_category_labels()[ $doelgroep ] ?? $doelgroep ) : '',
             ];
         }
@@ -2097,6 +2242,13 @@ function arrahma_emails_page() {
             $test_result = [ 'sent_to' => $test_email, 'label' => $types[ $test_type ] ];
         }
     }
+
+    // Verzendlog per e-mailtype, zodat de tabel "al gemaild" kan tonen en de JS kan overslaan.
+    // Bewust ná het verzendblok: anders toont de pagina na een verzending nog de oude stand.
+    $sent_logs = [];
+    foreach ( array_keys( $email_types ) as $t ) {
+        $sent_logs[ $t ] = arrahma_sent_log( $t );
+    }
     ?>
     <div class="wrap">
       <h1 style="display:flex;align-items:center;gap:.5rem">
@@ -2111,7 +2263,10 @@ function arrahma_emails_page() {
           <?= esc_html( $result['label'] ) ?><?php if ( ! empty( $result['doelgroep'] ) ) : ?> (alleen <?= esc_html( $result['doelgroep'] ) ?>)<?php endif; ?>
           verstuurd naar <?= (int) $result['sent'] ?> ontvanger<?= $result['sent'] !== 1 ? 's' : '' ?>.
           <?php if ( ! empty( $result['overgeslagen'] ) ) : ?>
-            <?= (int) $result['overgeslagen'] ?> overgeslagen: geen inschrijving in de gekozen doelgroep.
+            <?= (int) $result['overgeslagen'] ?> overgeslagen (geen inschrijving in de gekozen doelgroep, of al eerder gemaild).
+          <?php endif; ?>
+          <?php if ( ! empty( $result['mislukt'] ) ) : ?>
+            <strong style="color:#d32f2f"><?= (int) $result['mislukt'] ?> mislukt</strong> — die staan als mislukt in het verzendlog en kun je opnieuw proberen.
           <?php endif; ?>
         </p></div>
       <?php endif; ?>
@@ -2142,7 +2297,9 @@ function arrahma_emails_page() {
         Verstuurt één e-mail per geselecteerde ontvanger (gegroepeerd op e-mailadres, dus een gezin krijgt één e-mail voor al hun kinderen).
         De lijst bevat iedereen met een e-mailadres, dus ook jongeren en volwassenen die zichzelf hebben ingeschreven —
         per e-mailtype worden de ontvangers die er niet voor in aanmerking komen grijs en niet aanvinkbaar.
-        Er wordt niet bijgehouden wie al een e-mail kreeg — opnieuw versturen stuurt de e-mail nogmaals naar iedereen die je aanvinkt.
+        Versturen gebeurt in blokken van <?= (int) ARRAHMA_BATCH_SIZE ?>, met een voortgangsbalk. Dat voorkomt dat een grote
+        verzending vastloopt op de tijdslimiet van de server, en je ziet na elk blok waar je bent. Elke verzending wordt
+        gelogd, dus als er iets afbreekt kun je met "Sla over wie deze e-mail al heeft gehad" gewoon de rest oppakken.
       </p>
 
       <?php if ( empty( $recipients ) ) : ?>
@@ -2189,6 +2346,12 @@ function arrahma_emails_page() {
             <?php endforeach; ?>
           </select>
 
+          <label style="display:block;margin-bottom:1.25rem">
+            <input type="checkbox" name="skip_sent" id="arrahma-skip-sent" value="1" checked>
+            <strong>Sla over wie deze e-mail al heeft gehad</strong>
+            <span style="color:#888">— aan laten staan om dubbele e-mails te voorkomen; uitzetten om bewust opnieuw te versturen.</span>
+          </label>
+
           <h2 style="font-size:.8rem;text-transform:uppercase;letter-spacing:.08em;color:#2d3a4a;margin:1.5rem 0 .5rem">Naar wie?</h2>
           <table class="wp-list-table widefat fixed striped" style="max-width:800px;border-radius:8px;overflow:hidden">
             <thead>
@@ -2200,6 +2363,7 @@ function arrahma_emails_page() {
                 <th>Ingeschreven</th>
                 <th style="width:230px">Doelgroep(en)</th>
                 <th style="width:70px">Aantal</th>
+                <th style="width:150px">Al gemaild</th>
               </tr>
             </thead>
             <tbody>
@@ -2212,7 +2376,7 @@ function arrahma_emails_page() {
                       array_keys( $cat_counts )
                   );
               ?>
-                <tr data-counts="<?= esc_attr( wp_json_encode( $cat_counts ) ) ?>">
+                <tr data-key="<?= esc_attr( $key ) ?>" data-counts="<?= esc_attr( wp_json_encode( $cat_counts ) ) ?>">
                   <th scope="row" class="check-column" style="padding:8px 0 8px 10px">
                     <input type="checkbox" name="recipients[]" value="<?= esc_attr( $key ) ?>">
                   </th>
@@ -2220,17 +2384,27 @@ function arrahma_emails_page() {
                   <td><?= esc_html( implode( ', ', $r['names'] ) ) ?></td>
                   <td style="color:#666;font-size:.85em"><?= esc_html( implode( ', ', $cats ) ) ?></td>
                   <td class="arrahma-aantal"><?= count( $r['names'] ) ?></td>
+                  <td class="arrahma-gemaild" style="color:#888;font-size:.85em">—</td>
                 </tr>
               <?php endforeach; ?>
             </tbody>
           </table>
 
           <p class="submit">
-            <button type="submit" name="arrahma_send_emails" value="1" class="button button-primary">
-              Verstuur naar geselecteerde ouders
+            <button type="submit" name="arrahma_send_emails" value="1" class="button button-primary" id="arrahma-send-btn">
+              Verstuur naar geselecteerde ontvangers
             </button>
             <span id="arrahma-selected-count" style="margin-left:.75rem;color:#888;font-size:.85rem">0 geselecteerd</span>
           </p>
+
+          <!-- Voortgang tijdens het batchgewijs versturen; JS toont dit zodra er verzonden wordt. -->
+          <div id="arrahma-progress" style="display:none;max-width:800px;margin:0 0 1.5rem">
+            <div style="background:#e6e9ec;border-radius:50px;height:10px;overflow:hidden">
+              <div id="arrahma-progress-bar" style="background:#2d3a4a;height:100%;width:0;transition:width .25s"></div>
+            </div>
+            <p id="arrahma-progress-text" style="margin:.5rem 0 0;color:#555;font-size:.9rem"></p>
+            <ul id="arrahma-progress-fouten" style="margin:.25rem 0 0 1.25rem;color:#d32f2f;font-size:.85rem;list-style:disc"></ul>
+          </div>
         </form>
 
         <script>
@@ -2243,7 +2417,12 @@ function arrahma_emails_page() {
           var doelgroep = document.getElementById('arrahma-doelgroep');
 
           // Per e-mailtype de toegestane doelgroepen; null = alle. Zelfde bron als de server.
-          var TYPE_CATS = <?php echo wp_json_encode( $type_cats ); ?>;
+          var TYPE_CATS  = <?php echo wp_json_encode( $type_cats ); ?>;
+          // Per e-mailtype: welk adres kreeg 'm wanneer voor het laatst met succes.
+          var SENT_LOG   = <?php echo wp_json_encode( $sent_logs ); ?>;
+          var BATCH_SIZE = <?php echo (int) ARRAHMA_BATCH_SIZE; ?>;
+          var AJAX_URL   = <?php echo wp_json_encode( admin_url( 'admin-ajax.php' ) ); ?>;
+          var NONCE      = <?php echo wp_json_encode( wp_create_nonce( 'arrahma_send_emails' ) ); ?>;
 
           function boxes() { return form.querySelectorAll('input[name="recipients[]"]'); }
           function checkedBoxes() { return form.querySelectorAll('input[name="recipients[]"]:checked'); }
@@ -2288,6 +2467,14 @@ function arrahma_emails_page() {
 
               var cel = rij.querySelector('.arrahma-aantal');
               if (cel) cel.textContent = aantal;
+
+              // "Al gemaild" hoort bij het gekozen e-mailtype, dus die kolom volgt de keuze.
+              var gemaild = (SENT_LOG[huidigType()] || {})[rij.dataset.key];
+              var gcel    = rij.querySelector('.arrahma-gemaild');
+              if (gcel) {
+                gcel.textContent = gemaild ? gemaild.replace(' ', ' · ').slice(0, 16) : '—';
+                gcel.style.color = gemaild ? '#a06800' : '#888';
+              }
             });
             updateCount();
           }
@@ -2312,21 +2499,103 @@ function arrahma_emails_page() {
           });
           if (doelgroep) doelgroep.addEventListener('change', pasTypeToe);
 
+          // ── Batchgewijs versturen ──
+          // Eén verzoek per BATCH_SIZE ontvangers in plaats van alles in één keer: zo loopt een
+          // verzending van tientallen e-mails nooit tegen max_execution_time aan, en zie je na
+          // elke batch waar je bent. Breekt er iets af, dan staat in het verzendlog wie al
+          // gemaild is — met "Sla over wie deze e-mail al heeft gehad" pak je de rest gewoon op.
+          var bezig = false;
+
+          function toonVoortgang(gedaan, totaal, mislukt) {
+            var vak = document.getElementById('arrahma-progress');
+            vak.style.display = 'block';
+            document.getElementById('arrahma-progress-bar').style.width =
+              (totaal ? Math.round((gedaan / totaal) * 100) : 0) + '%';
+            document.getElementById('arrahma-progress-text').textContent =
+              gedaan + ' van ' + totaal + ' verwerkt' + (mislukt.length ? ' — ' + mislukt.length + ' mislukt' : '');
+            var lijst = document.getElementById('arrahma-progress-fouten');
+            lijst.innerHTML = mislukt.map(function (m) {
+              var li = document.createElement('li');
+              li.textContent = m;
+              return li.outerHTML;
+            }).join('');
+          }
+
+          function verstuurBatch(keys, type, dg, skip) {
+            var body = new URLSearchParams();
+            body.append('action', 'arrahma_send_batch');
+            body.append('_ajax_nonce', NONCE);
+            body.append('email_type', type);
+            body.append('doelgroep', dg);
+            if (skip) body.append('skip_sent', '1');
+            keys.forEach(function (k) { body.append('recipients[]', k); });
+
+            return fetch(AJAX_URL, { method: 'POST', credentials: 'same-origin', body: body })
+              .then(function (res) { return res.json(); })
+              .then(function (json) {
+                if (!json || !json.success) throw new Error((json && json.data && json.data.message) || 'Onbekende fout');
+                return json.data;
+              });
+          }
+
           form.addEventListener('submit', function (e) {
-            var n = checkedBoxes().length;
-            if (!n) {
-              e.preventDefault();
-              alert('Selecteer minimaal één ontvanger.');
-              return;
-            }
+            e.preventDefault();
+            if (bezig) return;
+
+            var boxenAan = Array.prototype.slice.call(checkedBoxes());
+            if (!boxenAan.length) { alert('Selecteer minimaal één ontvanger.'); return; }
+
             var type  = form.querySelector('input[name="email_type"]:checked');
             var label = type ? type.dataset.label : 'e-mail';
-            var dg    = doelgroep && doelgroep.value
-                        ? ' (alleen ' + doelgroep.options[doelgroep.selectedIndex].text + ')'
-                        : '';
-            if (!confirm('Verstuur "' + label + '"' + dg + ' naar ' + n + ' ontvanger(s)? Dit kan niet ongedaan worden gemaakt.')) {
-              e.preventDefault();
-            }
+            var dg    = doelgroep && doelgroep.value ? doelgroep.value : '';
+            var dgTxt = dg ? ' (alleen ' + doelgroep.options[doelgroep.selectedIndex].text + ')' : '';
+            var skip  = document.getElementById('arrahma-skip-sent');
+            var skipJa = skip ? skip.checked : false;
+
+            if (!confirm('Verstuur "' + label + '"' + dgTxt + ' naar ' + boxenAan.length +
+                         ' ontvanger(s)? Dit gebeurt in blokken van ' + BATCH_SIZE + '.')) return;
+
+            var keys    = boxenAan.map(function (cb) { return cb.value; });
+            var totaal  = keys.length;
+            var gedaan  = 0;
+            var mislukt = [];
+            var knop    = document.getElementById('arrahma-send-btn');
+
+            bezig = true;
+            knop.disabled = true;
+            knop.textContent = 'Bezig met versturen…';
+            toonVoortgang(0, totaal, mislukt);
+
+            (function volgende() {
+              if (!keys.length) {
+                bezig = false;
+                knop.disabled = false;
+                knop.textContent = 'Verstuur naar geselecteerde ontvangers';
+                document.getElementById('arrahma-progress-text').textContent =
+                  'Klaar: ' + (totaal - mislukt.length) + ' van ' + totaal + ' verwerkt' +
+                  (mislukt.length ? ' — ' + mislukt.length + ' mislukt (zie hieronder)' : '') +
+                  '. Herlaad de pagina om het verzendlog bij te werken.';
+                return;
+              }
+
+              var batch = keys.splice(0, BATCH_SIZE);
+              verstuurBatch(batch, type ? type.value : '', dg, skipJa)
+                .then(function (data) {
+                  gedaan += batch.length;
+                  if (data.mislukt && data.mislukt.length) mislukt = mislukt.concat(data.mislukt);
+                  toonVoortgang(gedaan, totaal, mislukt);
+                  volgende();
+                })
+                .catch(function (err) {
+                  // Stoppen, niet doorrazen: bij een serverfout weet je anders niet meer waar je bent.
+                  bezig = false;
+                  knop.disabled = false;
+                  knop.textContent = 'Verstuur naar geselecteerde ontvangers';
+                  document.getElementById('arrahma-progress-text').textContent =
+                    'Gestopt na ' + gedaan + ' van ' + totaal + ' — ' + err.message +
+                    '. Wat al verstuurd is staat in het verzendlog; herlaad en verstuur de rest met "Sla over wie deze e-mail al heeft gehad" aan.';
+                });
+            })();
           });
 
           pasTypeToe();
