@@ -31,6 +31,10 @@ define( 'ARRAHMA_SLOT_STATUS_OPTION',    'arrahma_slot_status' );
 // Capaciteit per lesblok/lesgroep: [ sleutel => aantal ]. Ontbrekend = standaard hierboven.
 define( 'ARRAHMA_SLOT_CAP_OPTION',       'arrahma_slot_caps' );
 
+// Startdatum van het lesjaar, zoals genoemd in de plaatsingsmail voor kinderen.
+// Elk schooljaar hier bijwerken — de tekst eromheen hoeft dan niet aangeraakt te worden.
+define( 'ARRAHMA_START_LESSEN', 'maandag 5 oktober 2026' );
+
 // Lesgroepen met status 'op_uitnodiging' verschijnen alleen als de bezoeker hun sleutel
 // meekrijgt in de URL: ?toegang=br_volw_n5_zo (meerdere gescheiden door komma's).
 // Bewust géén beveiliging — wie de link heeft, mag inschrijven.
@@ -116,6 +120,23 @@ function arrahma_category_labels(): array {
 }
 
 /** Categorieën die het formulier daadwerkelijk aanbiedt. */
+/**
+ * Korte doelgroepnaam, bedoeld voor onderwerpregels.
+ *
+ * De volledige labels ("Broeders — volwassenen (17+)") bevatten zelf al een gedachtestreepje en
+ * haakjes; die lopen vast in een onderwerp dat zelf ook haakjes gebruikt.
+ */
+function arrahma_category_short_label( string $categorie ): string {
+    $kort = [
+        'kinderen'             => 'Kinderen',
+        'broeders_jongeren'    => 'Broeders 12–16',
+        'broeders_volwassenen' => 'Broeders 17+',
+        'zusters_jongeren'     => 'Zusters 12–16',
+        'zusters_volwassenen'  => 'Zusters 17+',
+    ];
+    return $kort[ $categorie ] ?? ( arrahma_category_labels()[ $categorie ] ?? $categorie );
+}
+
 function arrahma_active_categories(): array {
     return [ 'kinderen', 'broeders_jongeren', 'broeders_volwassenen', 'zusters_jongeren', 'zusters_volwassenen' ];
 }
@@ -974,7 +995,7 @@ function arrahma_send_confirmation_email( string $email, array $rows, string $su
  * 'gemengd' (kinderen én een volwassene op één adres) krijgt de oudertekst: er zitten kinderen
  * bij, dus de ouderbijeenkomst geldt wel degelijk voor die lezer.
  */
-function arrahma_send_indeling_email( string $email, array $rows, string $subject_prefix = '' ): void {
+function arrahma_send_indeling_email( string $email, array $rows, string $subject_prefix = '', string $doelgroep = '' ): void {
     if ( empty( $rows ) || ! $email ) return;
 
     $rows  = array_values( $rows );
@@ -991,12 +1012,16 @@ function arrahma_send_indeling_email( string $email, array $rows, string $subjec
         $dt   = arrahma_slot_dag_tijd( (string) ( $r['rooster'] ?? '' ) );
         $i++;
 
-        $rijen = ( $dt['dag'] !== '' || $dt['tijd'] !== '' )
-            ? arrahma_email_row( '📅 Dag', $dt['dag'] ?: '—', false )
-              . arrahma_email_row( '🕐 Tijd', $dt['tijd'] ?: '—', true )
-            : arrahma_email_row( 'Lesmoment', 'Nog niet ingedeeld', false );
+        // De naam staat altijd in de tabel, ook bij één ingeschrevene: de ontvanger moet kunnen
+        // zien over wie het gaat zonder dat uit de aanhef te hoeven afleiden.
+        $rijen = arrahma_email_row( 'Naam', $naam !== '' ? $naam : '—', false );
 
-        $kop = $meer ? ( $naam !== '' ? $naam : 'Ingeschrevene ' . $i ) : 'Lesmoment';
+        $rijen .= ( $dt['dag'] !== '' || $dt['tijd'] !== '' )
+            ? arrahma_email_row( '📅 Dag', $dt['dag'] ?: '—', true )
+              . arrahma_email_row( '🕐 Tijd', $dt['tijd'] ?: '—', false )
+            : arrahma_email_row( 'Lesmoment', 'Nog niet ingedeeld', true );
+
+        $kop = $meer ? 'Lesmoment ' . $i : 'Lesmoment';
 
         $lesmomenten .= '
         <p style="margin:22px 0 8px;font-size:11px;font-weight:700;letter-spacing:0.1em;text-transform:uppercase;color:#2d3a4a;">' . esc_html( $kop ) . '</p>
@@ -1023,6 +1048,20 @@ function arrahma_send_indeling_email( string $email, array $rows, string $subjec
         $niveau    = 'Tijdens de eerste lessen zal de docent het niveau beoordelen. Mocht blijken dat een ander niveau beter aansluit, dan kun je worden overgeplaatst naar een andere groep.';
         $contact   = 'dan nemen wij hierover eerst contact met je op.';
     }
+
+    // ── Startdatum van de lessen: alleen in de kinderenversie gevraagd.
+    // Bewust "de lessen starten op" en niet "de eerste les is op": 5 oktober is een maandag,
+    // terwijl de lesblokken op verschillende dagen vallen (za/zo, ma/wo, di/do). Elk kind komt
+    // vanaf die datum op het eigen lesmoment hierboven.
+    $startdatum = ! $ouder ? '' : '
+      <div style="border-left:3px solid #2d3a4a;padding:14px 18px;background:#f4f6f8;border-radius:0 6px 6px 0;margin:28px 0;">
+        <p style="margin:0;font-size:13px;color:#555;line-height:1.6;">
+          <strong style="color:#1a1a1a;">De lessen starten op ' . esc_html( ARRAHMA_START_LESSEN ) . '.</strong><br>
+          Vanaf die week ' . ( $meer
+              ? 'worden jullie kinderen op de hierboven genoemde lesmomenten verwacht.'
+              : 'wordt jullie kind op het hierboven genoemde lesmoment verwacht.' ) . '
+        </p>
+      </div>';
 
     // ── Verplichte ouderbijeenkomst: alleen relevant zodra er kinderen bij zitten.
     $ouderbijeenkomst = ! $ouder ? '' : '
@@ -1063,6 +1102,8 @@ function arrahma_send_indeling_email( string $email, array $rows, string $subjec
 
       ' . $lesmomenten . '
 
+      ' . $startdatum . '
+
       <p style="margin:22px 0 16px;font-size:15px;line-height:1.7;color:#444;">' . $niveau . '</p>
 
       <p style="margin:0 0 16px;font-size:15px;line-height:1.7;color:#444;">
@@ -1094,7 +1135,15 @@ function arrahma_send_indeling_email( string $email, array $rows, string $subjec
         'From: Vereniging Arrahma <oudercomite@vereniging-arrahma.nl>',
     ];
 
-    wp_mail( $email, $subject_prefix . 'Definitieve plaatsing — Vereniging Arrahma', arrahma_email_wrap( $inner_html ), $headers );
+    // Is er op één doelgroep gefilterd, dan komt die in het onderwerp. Bij "Alle doelgroepen"
+    // blijft het onderwerp neutraal: de e-mail gaat dan over meerdere doelgroepen tegelijk.
+    $onderwerp = 'Definitieve plaatsing';
+    if ( $doelgroep !== '' && isset( arrahma_category_labels()[ $doelgroep ] ) ) {
+        $onderwerp .= ' (' . arrahma_category_short_label( $doelgroep ) . ')';
+    }
+    $onderwerp .= ' — Vereniging Arrahma';
+
+    wp_mail( $email, $subject_prefix . $onderwerp, arrahma_email_wrap( $inner_html ), $headers );
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -2006,7 +2055,7 @@ function arrahma_emails_page() {
                 if ( $type === 'ouderavond' ) {
                     arrahma_send_ouderavond_email( $r['email'], arrahma_names_from_rows( $rows ) );
                 } elseif ( $type === 'indeling' ) {
-                    arrahma_send_indeling_email( $r['email'], $rows );
+                    arrahma_send_indeling_email( $r['email'], $rows, '', $doelgroep );
                 } else {
                     arrahma_send_confirmation_email( $r['email'], $rows );
                 }
