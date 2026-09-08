@@ -1411,6 +1411,11 @@ function arrahma_send_ouderavond_email( string $email, array $names, string $sub
     $namen_html = esc_html( implode( ', ', $names ) );
     $form_url   = arrahma_ouderavond_prefill_url( $email, $names );
 
+    // Eén e-mail kan over meerdere kinderen gaan; "je kind" leest dan scheef.
+    $kind_zin = count( $names ) > 1
+        ? 'Aanwezigheid is een voorwaarde voor toelating van je kinderen tot de lessen.'
+        : 'Aanwezigheid is een voorwaarde voor toelating van je kind tot de lessen.';
+
     $inner_html = '
       <h2 style="margin:0 0 20px;font-size:22px;font-weight:700;color:#1a1a1a;">As-salāmu ʿalaykum,</h2>
 
@@ -1418,8 +1423,14 @@ function arrahma_send_ouderavond_email( string $email, array $names, string $sub
         Dit bericht is voor de ouder/verzorger van <strong>' . $namen_html . '</strong>.
       </p>
 
+      <p style="margin:0 0 16px;font-size:15px;line-height:1.7;color:#444;">
+        Voorafgaand aan het nieuwe schooljaar organiseren wij twee ouderavonden.
+        Het is verplicht dat minimaal één ouder/verzorger één van de twee ouderavonden bijwoont.
+        ' . $kind_zin . '
+      </p>
+
       <p style="margin:0 0 28px;font-size:15px;line-height:1.7;color:#444;">
-        Voorafgaand aan het nieuwe schooljaar organiseren wij twee ouderavonden. Geef via onderstaande knop aan welke avond je kunt bijwonen.
+        Geef via onderstaande knop aan welke avond je kunt bijwonen.
       </p>
 
       <div style="text-align:center;margin-bottom:28px;">
