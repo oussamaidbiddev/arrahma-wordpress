@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Arrahma Inschrijvingen
  * Description: Slaat lesaanmeldingen op in de database en toont ze in een overzichtspagina met CSV-export.
- * Version:     1.13.0
+ * Version:     1.14.0
  * Author:      Vereniging Arrahma
  */
 
@@ -17,7 +17,7 @@ define( 'ARRAHMA_LOG_TABLE',   'arrahma_email_log' );
 // Aantal e-mails per HTTP-verzoek tijdens het verzenden. Klein genoeg om ruim binnen een
 // krappe max_execution_time (30s) te blijven, ook als een SMTP-verbinding traag is.
 define( 'ARRAHMA_BATCH_SIZE',  10 );
-define( 'ARRAHMA_VERSION',     '1.13.0' );
+define( 'ARRAHMA_VERSION',     '1.14.0' );
 
 // Standaardcapaciteit. De capaciteit is per lesblok/lesgroep in te stellen via
 // Inschrijvingen → Instellingen; deze waarden gelden zolang daar niets is opgeslagen.
@@ -1011,8 +1011,8 @@ function arrahma_send_confirmation_email( string $email, array $rows, string $su
  *
  * Bewust zonder geboortedatum, adres, IBAN of betaalwijze — die staan al in de bevestigingsmail.
  * De tekst voor kinderen is aangeleverd door de Religieuze Commissie; die versie bevat ook het
- * stuk over de verplichte ouderbijeenkomst. Jongeren en volwassenen die zichzelf inschrijven
- * krijgen dezelfde structuur zonder dat stuk, omdat het daar niet op slaat.
+ * stuk over de verplichte ouderbijeenkomst en de startdatum. Jongeren en volwassenen die zichzelf
+ * inschrijven (12+) krijgen een eigen, eveneens aangeleverde tekst: zie arrahma_indeling_html_zelf().
  *
  * 'gemengd' (kinderen én een volwassene op één adres) krijgt de oudertekst: er zitten kinderen
  * bij, dus de ouderbijeenkomst geldt wel degelijk voor die lezer.
@@ -1052,30 +1052,39 @@ function arrahma_send_indeling_email( string $email, array $rows, string $subjec
         </table>';
     }
 
-    // ── Tekstvarianten. Alleen de bewoording verschilt; de opbouw is voor iedereen gelijk.
-    if ( $ouder ) {
-        $dank      = $meer
-            ? 'BarakAllahu feekum voor de inschrijving van jullie kinderen.'
-            : 'BarakAllahu feekum voor de inschrijving van jullie kind.';
-        $geplaatst = $meer
-            ? 'Via deze e-mail laten wij weten dat jullie kinderen definitief zijn geplaatst op de volgende lesmomenten:'
-            : 'Via deze e-mail laten wij weten dat jullie kind definitief is geplaatst op het volgende lesmoment:';
-        $niveau    = $meer
-            ? 'Bij de inschrijving hebben jullie zelf een inschatting gemaakt van het niveau van jullie kinderen. Tijdens de eerste lessen zal de docent het niveau verder beoordelen. Mocht blijken dat een ander niveau beter aansluit, dan kunnen zij worden overgeplaatst naar een andere groep.'
-            : 'Bij de inschrijving hebben jullie zelf een inschatting gemaakt van het niveau van jullie kind. Tijdens de eerste lessen zal de docent het niveau verder beoordelen. Mocht blijken dat een ander niveau beter aansluit, dan kan jullie kind worden overgeplaatst naar een andere groep.';
-        $contact   = 'dan nemen wij hierover eerst contact met jullie op.';
-    } else {
-        $dank      = 'BarakAllahu feekum voor je inschrijving.';
-        $geplaatst = 'Via deze e-mail laten wij weten dat je definitief bent geplaatst op het volgende lesmoment:';
-        $niveau    = 'Tijdens de eerste lessen zal de docent het niveau beoordelen. Mocht blijken dat een ander niveau beter aansluit, dan kun je worden overgeplaatst naar een andere groep.';
-        $contact   = 'dan nemen wij hierover eerst contact met je op.';
+    $headers = [
+        'Content-Type: text/html; charset=UTF-8',
+        'From: Vereniging Arrahma <oudercomite@vereniging-arrahma.nl>',
+    ];
+
+    // ── Jongeren & volwassenen (12+) krijgen een eigen tekst van de Religieuze Commissie:
+    // zonder startdatum (die volgt via de WhatsApp-groep van de lesgroep) en zonder ouderbijeenkomst.
+    if ( ! $ouder ) {
+        return wp_mail(
+            $email,
+            $subject_prefix . arrahma_indeling_onderwerp_zelf( $rows ),
+            arrahma_email_wrap( arrahma_indeling_html_zelf( $lesmomenten ) ),
+            $headers
+        );
     }
+
+    // ── Vanaf hier alleen de kinderenversie ('ouder', of 'gemengd' met kinderen erbij).
+    $dank      = $meer
+        ? 'BarakAllahu feekum voor de inschrijving van jullie kinderen.'
+        : 'BarakAllahu feekum voor de inschrijving van jullie kind.';
+    $geplaatst = $meer
+        ? 'Via deze e-mail laten wij weten dat jullie kinderen definitief zijn geplaatst op de volgende lesmomenten:'
+        : 'Via deze e-mail laten wij weten dat jullie kind definitief is geplaatst op het volgende lesmoment:';
+    $niveau    = $meer
+        ? 'Bij de inschrijving hebben jullie zelf een inschatting gemaakt van het niveau van jullie kinderen. Tijdens de eerste lessen zal de docent het niveau verder beoordelen. Mocht blijken dat een ander niveau beter aansluit, dan kunnen zij worden overgeplaatst naar een andere groep.'
+        : 'Bij de inschrijving hebben jullie zelf een inschatting gemaakt van het niveau van jullie kind. Tijdens de eerste lessen zal de docent het niveau verder beoordelen. Mocht blijken dat een ander niveau beter aansluit, dan kan jullie kind worden overgeplaatst naar een andere groep.';
+    $contact   = 'dan nemen wij hierover eerst contact met jullie op.';
 
     // ── Startdatum van de lessen: alleen in de kinderenversie gevraagd.
     // Bewust "de lessen starten op" en niet "de eerste les is op": 5 oktober is een maandag,
     // terwijl de lesblokken op verschillende dagen vallen (za/zo, ma/wo, di/do). Elk kind komt
     // vanaf die datum op het eigen lesmoment hierboven.
-    $startdatum = ! $ouder ? '' : '
+    $startdatum = '
       <div style="border-left:3px solid #2d3a4a;padding:14px 18px;background:#f4f6f8;border-radius:0 6px 6px 0;margin:28px 0;">
         <p style="margin:0;font-size:13px;color:#555;line-height:1.6;">
           <strong style="color:#1a1a1a;">De lessen starten op ' . esc_html( ARRAHMA_START_LESSEN ) . '.</strong><br>
@@ -1085,8 +1094,8 @@ function arrahma_send_indeling_email( string $email, array $rows, string $subjec
         </p>
       </div>';
 
-    // ── Verplichte ouderbijeenkomst: alleen relevant zodra er kinderen bij zitten.
-    $ouderbijeenkomst = ! $ouder ? '' : '
+    // ── Verplichte ouderbijeenkomst.
+    $ouderbijeenkomst = '
       <p style="margin:28px 0 8px;font-size:11px;font-weight:700;letter-spacing:0.1em;text-transform:uppercase;color:#2d3a4a;">Verplichte ouderbijeenkomst</p>
 
       <p style="margin:0 0 16px;font-size:15px;line-height:1.7;color:#444;">
@@ -1109,9 +1118,7 @@ function arrahma_send_indeling_email( string $email, array $rows, string $subjec
         </p>
       </div>';
 
-    $afsluiting = $ouder
-        ? '<p style="margin:0 0 16px;font-size:15px;line-height:1.7;color:#444;">Tot de ouderbijeenkomst, in shaa Allah.</p>'
-        : '';
+    $afsluiting = '<p style="margin:0 0 16px;font-size:15px;line-height:1.7;color:#444;">Tot de ouderbijeenkomst, in shaa Allah.</p>';
 
     $inner_html = '
       <h2 style="margin:0 0 20px;font-size:22px;font-weight:700;color:#1a1a1a;">Assalam alaykoum wa rahmatullahi wa barakatuh,</h2>
@@ -1152,11 +1159,6 @@ function arrahma_send_indeling_email( string $email, array $rows, string $subjec
         Vereniging Arrahma
       </p>';
 
-    $headers = [
-        'Content-Type: text/html; charset=UTF-8',
-        'From: Vereniging Arrahma <oudercomite@vereniging-arrahma.nl>',
-    ];
-
     // Is er op één doelgroep gefilterd, dan komt die in het onderwerp. Bij "Alle doelgroepen"
     // blijft het onderwerp neutraal: de e-mail gaat dan over meerdere doelgroepen tegelijk.
     $onderwerp = 'Definitieve plaatsing';
@@ -1166,6 +1168,72 @@ function arrahma_send_indeling_email( string $email, array $rows, string $subjec
     $onderwerp .= ' — Vereniging Arrahma';
 
     return wp_mail( $email, $subject_prefix . $onderwerp, arrahma_email_wrap( $inner_html ), $headers );
+}
+
+/**
+ * Onderwerp van de plaatsingsmail voor jongeren & volwassenen (12+).
+ *
+ * De leeftijdsgroep staat tussen haakjes, afgeleid uit de inschrijvingen in de e-mail zelf:
+ * "(jongeren)" voor 12–16, "(volwassenen)" voor 17+. Gaat één e-mail over beide, dan vervalt het
+ * haakje in plaats van een van de twee verkeerd te noemen.
+ */
+function arrahma_indeling_onderwerp_zelf( array $rows ): string {
+    $groepen = array_values( array_unique( array_map(
+        function ( $row ) {
+            $cat = (string) ( arrahma_row_to_array( $row )['inschrijving_voor'] ?? '' );
+            return preg_match( '/_(jongeren|volwassenen)$/', $cat, $m ) ? $m[1] : '';
+        },
+        $rows
+    ) ) );
+
+    $haakje = ( count( $groepen ) === 1 && $groepen[0] !== '' ) ? ' – (' . $groepen[0] . ')' : '';
+    return 'Bevestiging plaatsing Arabisch onderwijs' . $haakje . ' | Vereniging Arrahma';
+}
+
+/**
+ * Inhoud van de plaatsingsmail voor jongeren & volwassenen (12+). Tekst aangeleverd door de
+ * Religieuze Commissie; opmaak volgt de gedeelde bouwstenen van de andere e-mails.
+ */
+function arrahma_indeling_html_zelf( string $lesmomenten ): string {
+    return '
+      <h2 style="margin:0 0 20px;font-size:22px;font-weight:700;color:#1a1a1a;">Assalam alaykoum wa rahmatullahi wa barakatuh,</h2>
+
+      <p style="margin:0 0 16px;font-size:15px;line-height:1.7;color:#444;">
+        BarakAllahu feek voor je inschrijving voor het Arabisch onderwijs. Mocht je nog geen eerdere bevestiging hebben ontvangen, dan bevestigen wij hierbij alsnog je inschrijving.
+      </p>
+
+      <p style="margin:0 0 16px;font-size:15px;line-height:1.7;color:#444;">Je bent definitief geplaatst op het volgende lesmoment:</p>
+
+      ' . $lesmomenten . '
+
+      <p style="margin:22px 0 16px;font-size:15px;line-height:1.7;color:#444;">
+        Bij de inschrijving heb je zelf een inschatting gemaakt van je niveau. Tijdens de eerste lessen zal de docent dit verder beoordelen. Mocht blijken dat een ander niveau beter bij je aansluit, dan kan het nodig zijn om je in een andere groep te plaatsen. Als hierdoor ook je lesdag of tijdstip verandert, nemen we hierover contact met je op.
+      </p>
+
+      <p style="margin:28px 0 8px;font-size:11px;font-weight:700;letter-spacing:0.1em;text-transform:uppercase;color:#2d3a4a;">WhatsApp-groep</p>
+
+      <p style="margin:0 0 16px;font-size:15px;line-height:1.7;color:#444;">
+        Je bent inmiddels toegevoegd, of ontvangt binnenkort een uitnodiging, voor de WhatsApp-groep van jouw lesgroep. Houd deze groep goed in de gaten. Hier delen we de praktische informatie over de lessen, waaronder de exacte startdatum.
+      </p>
+
+      <div style="border-left:3px solid #2d3a4a;padding:14px 18px;background:#f4f6f8;border-radius:0 6px 6px 0;margin:28px 0;">
+        <p style="margin:0;font-size:13px;color:#555;line-height:1.6;">
+          Controleer daarom of je bent toegevoegd of een uitnodiging hebt ontvangen. Heb je niets ontvangen? Laat het ons dan weten via
+          <a href="mailto:lessen@vereniging-arrahma.nl" style="color:#2d3a4a;font-weight:600;text-decoration:none;">lessen@vereniging-arrahma.nl</a>.
+        </p>
+      </div>
+
+      <p style="margin:0 0 16px;font-size:15px;line-height:1.7;color:#444;">
+        We verwachten je op het hierboven genoemde vaste lesmoment vanaf de startdatum die in de WhatsApp-groep wordt gecommuniceerd, in shaa Allah.
+      </p>
+
+      <p style="margin:0 0 16px;font-size:15px;line-height:1.7;color:#444;">JazakAllahu khayran en tot de eerste les!</p>
+
+      <p style="margin:0;font-size:14px;color:#666;line-height:1.7;">
+        <strong style="color:#1a1a1a;">Religieuze Commissie</strong><br>
+        Afdeling Arabisch Onderwijs<br>
+        Vereniging Arrahma
+      </p>';
 }
 
 // ─────────────────────────────────────────────────────────────
