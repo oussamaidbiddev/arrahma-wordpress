@@ -26,6 +26,22 @@ An admin-triggered, one-time bulk email — reusing the existing branded templat
 - [Create the Google Form for parent-meeting slot selection](../tickets/parent-meeting-emails/01-create-google-form.md) — Form built, field IDs known (`entry.1335557813`=Ouder e-mail, `entry.366086080`=Kind(eren)), response spreadsheet linked. Unblocks the send-logic ticket.
 - [Build the admin-triggered parent-meeting invite send](../tickets/parent-meeting-emails/02-build-invite-send.md) — implemented in `arrahma-inschrijvingen.php` v1.5.0: new "Ouderavond" sub-page, grouped-by-email preview + confirm, sends via `arrahma_send_ouderavond_email()` reusing the branded template. Not yet smoke-tested against a live WordPress instance — do that before relying on it.
 
+## Nagekomen: doelgroepgrens (2026-09-07)
+
+Toen deze map werd geschreven bestond alleen de doelgroep *kinderen*, dus "elke ouder" en "elke
+inschrijving met een e-mailadres" waren hetzelfde. Sinds de jongeren- en volwassenenlessen erbij
+kwamen ([jongeren-volwassenen-lessen](../../specs/jongeren-volwassenen-lessen.md)) klopte dat niet
+meer: `arrahma_email_recipients()` selecteert álle rijen met een e-mailadres, dus de
+ouderavond-uitnodiging kon naar een broeder van 30 die zichzelf had ingeschreven — met zijn eigen
+naam voorgevuld in het formulierveld "Kind(eren)".
+
+Opgelost met `arrahma_email_types()`, waarin per e-mailtype staat voor welke doelgroepen het bedoeld
+is (`ouderavond` → alleen `kinderen`; de rest → alle). De filtering gebeurt **per rij, niet per
+ontvanger**: één e-mailadres kan gemengd zijn — een vader met twee kinderen die zichzelf ook heeft
+ingeschreven krijgt de ouderavond-mail met alleen zijn twee kinderen erin. Ontvangers zonder
+passende rij worden op de verzendpagina grijs en niet-aanvinkbaar, en serverzijde overgeslagen met
+een telling in de bevestigingsmelding.
+
 ## Not yet specified
 
 _(none — both tickets resolved; see Decisions so far)_
