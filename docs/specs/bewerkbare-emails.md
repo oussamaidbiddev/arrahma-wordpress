@@ -93,7 +93,7 @@ Sinds de aanspreekvorm-wijziging stond in élke bevestiging na een kinderaanmeld
 
 ## Bijlagen (1.17.0)
 
-Op **Inschrijvingen → E-mails** kun je Word-, Excel- en PDF-bestanden (`pdf doc docx xls xlsx`) uit de
+Op **Inschrijvingen → E-mails** kun je Word-, Excel-, PowerPoint- en PDF-bestanden (`pdf doc docx xls xlsx pptx`) uit de
 mediabibliotheek meesturen: max. `ARRAHMA_BIJLAGE_MAX` (5) bestanden, samen max. `ARRAHMA_BIJLAGE_MAX_MB`
 (10 MB). Elke ontvanger krijgt dezelfde bijlagen; ze gaan ook mee met de testmail.
 

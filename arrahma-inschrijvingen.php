@@ -1006,8 +1006,8 @@ function arrahma_send_confirmation_email( string $email, array $rows, string $su
     return arrahma_send_template_email( 'bevestiging', $email, $rows, $subject_prefix );
 }
 
-// ── Bijlagen bij bulkmail: alleen Word, Excel en PDF uit de mediabibliotheek.
-define( 'ARRAHMA_BIJLAGE_EXT',    [ 'pdf', 'doc', 'docx', 'xls', 'xlsx' ] );
+// ── Bijlagen bij bulkmail: alleen Word, Excel, PowerPoint en PDF uit de mediabibliotheek.
+define( 'ARRAHMA_BIJLAGE_EXT',    [ 'pdf', 'doc', 'docx', 'xls', 'xlsx', 'pptx' ] );
 define( 'ARRAHMA_BIJLAGE_MAX',    5 );   // bestanden per e-mail
 define( 'ARRAHMA_BIJLAGE_MAX_MB', 10 );  // samen; veel mailservers weigeren grotere berichten
 
@@ -1032,7 +1032,7 @@ function arrahma_bijlagen_uit_request(): array {
             return $uit;
         }
         if ( ! in_array( $ext, ARRAHMA_BIJLAGE_EXT, true ) ) {
-            $uit['fout'] = basename( $pad ) . ' is geen Word-, Excel- of PDF-bestand.';
+            $uit['fout'] = basename( $pad ) . ' is geen Word-, Excel-, PowerPoint- of PDF-bestand.';
             return $uit;
         }
         $totaal          += (int) filesize( $pad );
@@ -3204,7 +3204,7 @@ function arrahma_emails_page() {
 
           <h2 style="font-size:.8rem;text-transform:uppercase;letter-spacing:.08em;color:#2d3a4a;margin:1.5rem 0 .5rem">Bijlagen (optioneel)</h2>
           <p style="color:#888;font-size:.85rem;margin:0 0 .5rem;max-width:680px">
-            Word, Excel of PDF uit de mediabibliotheek, maximaal <?= (int) ARRAHMA_BIJLAGE_MAX ?> bestanden en samen <?= (int) ARRAHMA_BIJLAGE_MAX_MB ?> MB.
+            Word, Excel, PowerPoint (.pptx) of PDF uit de mediabibliotheek, maximaal <?= (int) ARRAHMA_BIJLAGE_MAX ?> bestanden en samen <?= (int) ARRAHMA_BIJLAGE_MAX_MB ?> MB.
             Elke ontvanger krijgt dezelfde bijlagen; ze gaan ook mee met de testmail hierboven.
             Let op: bestanden in de mediabibliotheek zijn via hun link openbaar — zet er geen persoonsgegevens in.
           </p>
@@ -3291,12 +3291,13 @@ function arrahma_emails_page() {
           var AJAX_URL   = <?php echo wp_json_encode( admin_url( 'admin-ajax.php' ) ); ?>;
           var NONCE      = <?php echo wp_json_encode( wp_create_nonce( 'arrahma_send_emails' ) ); ?>;
 
-          // ── Bijlagen: kiezen uit de mediabibliotheek (alleen Word, Excel, PDF)
+          // ── Bijlagen: kiezen uit de mediabibliotheek (alleen Word, Excel, PowerPoint, PDF)
           var BIJLAGE_MAX = <?php echo (int) ARRAHMA_BIJLAGE_MAX; ?>;
           var BIJLAGE_MIME = [
             'application/pdf', 'application/msword',
             'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-            'application/vnd.ms-excel', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+            'application/vnd.ms-excel', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+            'application/vnd.openxmlformats-officedocument.presentationml.presentation'
           ];
           var bijlagen = [];   // [{ id, naam, grootte }]
           var kader;
@@ -3331,7 +3332,7 @@ function arrahma_emails_page() {
             if (!window.wp || !wp.media) { alert('De mediabibliotheek kon niet worden geladen. Herlaad de pagina.'); return; }
             if (!kader) {
               kader = wp.media({
-                title: 'Bijlage kiezen (Word, Excel of PDF)',
+                title: 'Bijlage kiezen (Word, Excel, PowerPoint of PDF)',
                 button: { text: 'Toevoegen als bijlage' },
                 multiple: 'add',
                 library: { type: BIJLAGE_MIME }
@@ -3339,7 +3340,7 @@ function arrahma_emails_page() {
               kader.on('select', function () {
                 kader.state().get('selection').each(function (m) {
                   var a = m.toJSON();
-                  if (BIJLAGE_MIME.indexOf(a.mime) === -1) { alert(a.filename + ' is geen Word-, Excel- of PDF-bestand.'); return; }
+                  if (BIJLAGE_MIME.indexOf(a.mime) === -1) { alert(a.filename + ' is geen Word-, Excel-, PowerPoint- of PDF-bestand.'); return; }
                   if (bijlagen.some(function (b) { return b.id === a.id; })) return;
                   if (bijlagen.length >= BIJLAGE_MAX) { alert('Maximaal ' + BIJLAGE_MAX + ' bijlagen.'); return; }
                   bijlagen.push({ id: a.id, naam: a.filename, grootte: a.filesizeHumanReadable });
