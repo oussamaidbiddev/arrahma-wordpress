@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Arrahma Inschrijvingen
  * Description: Slaat lesaanmeldingen op in de database en toont ze in een overzichtspagina met CSV-export.
- * Version:     1.16.0
+ * Version:     1.17.0
  * Author:      Vereniging Arrahma
  */
 
@@ -17,7 +17,7 @@ define( 'ARRAHMA_LOG_TABLE',   'arrahma_email_log' );
 // Aantal e-mails per HTTP-verzoek tijdens het verzenden. Klein genoeg om ruim binnen een
 // krappe max_execution_time (30s) te blijven, ook als een SMTP-verbinding traag is.
 define( 'ARRAHMA_BATCH_SIZE',  10 );
-define( 'ARRAHMA_VERSION',     '1.16.0' );
+define( 'ARRAHMA_VERSION',     '1.17.0' );
 
 // Standaardcapaciteit. De capaciteit is per lesblok/lesgroep in te stellen via
 // Inschrijvingen → Instellingen; deze waarden gelden zolang daar niets is opgeslagen.
@@ -78,6 +78,7 @@ function arrahma_create_table() {
         woonplaats           VARCHAR(100) NOT NULL,
         niveau               VARCHAR(50)  NOT NULL,
         rooster              VARCHAR(40)  NOT NULL DEFAULT '',
+        klas                 VARCHAR(20)  NOT NULL DEFAULT '',
         rekeningnummer       VARCHAR(40)  NOT NULL,
         naam_rekeninghouder  VARCHAR(150) NOT NULL,
         betaalwijze          VARCHAR(20)  NOT NULL DEFAULT 'maandelijks',
@@ -104,9 +105,38 @@ function arrahma_create_table() {
         KEY type_email (email_type, email(100))
     ) {$charset};";
 
+    $aanwezig_table = $wpdb->prefix . ARRAHMA_AANWEZIG_TABLE;
+    $aanwezig_sql   = "CREATE TABLE {$aanwezig_table} (
+        id               BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+        inschrijving_id  BIGINT UNSIGNED NOT NULL,
+        rooster          VARCHAR(40)     NOT NULL,
+        lesdatum         DATE            NOT NULL,
+        status           VARCHAR(12)     NOT NULL,
+        door             BIGINT UNSIGNED NOT NULL DEFAULT 0,
+        gewijzigd_op     DATETIME        NOT NULL,
+        PRIMARY KEY  (id),
+        UNIQUE KEY uniek (inschrijving_id,lesdatum,rooster),
+        KEY les (rooster,lesdatum)
+    ) {$charset};";
+
+    $notitie_table = $wpdb->prefix . ARRAHMA_NOTITIE_TABLE;
+    $notitie_sql   = "CREATE TABLE {$notitie_table} (
+        id               BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+        inschrijving_id  BIGINT UNSIGNED NOT NULL,
+        tekst            TEXT            NOT NULL,
+        auteur           BIGINT UNSIGNED NOT NULL DEFAULT 0,
+        aangemaakt_op    DATETIME        NOT NULL,
+        gewijzigd_op     DATETIME        NULL,
+        PRIMARY KEY  (id),
+        KEY inschrijving (inschrijving_id)
+    ) {$charset};";
+
     require_once ABSPATH . 'wp-admin/includes/upgrade.php';
     dbDelta( $sql );
     dbDelta( $log_sql );
+    dbDelta( $aanwezig_sql );
+    dbDelta( $notitie_sql );
+    arrahma_registreer_docent_rol();
 
     update_option( 'arrahma_db_version', ARRAHMA_VERSION );
 }
@@ -157,6 +187,14 @@ function arrahma_category_short_label( string $categorie ): string {
         'zusters_volwassenen'  => 'Zusters 17+',
     ];
     return $kort[ $categorie ] ?? ( arrahma_category_labels()[ $categorie ] ?? $categorie );
+}
+
+/**
+ * Statussen van een inschrijving. "uitgeschreven" = halverwege gestopt: verdwijnt uit de klaslijsten,
+ * telt niet mee voor de capaciteit en krijgt geen bulkmail meer, maar de aanwezigheid blijft bewaard.
+ */
+function arrahma_statussen(): array {
+    return [ 'nieuw', 'verwerkt', 'afgewezen', 'uitgeschreven' ];
 }
 
 function arrahma_active_categories(): array {
@@ -447,7 +485,7 @@ function arrahma_get_rooster_counts() {
 
     $counts = array_fill_keys( array_keys( arrahma_roster_labels() ), 0 );
 
-    $rows = $wpdb->get_results( "SELECT rooster, COUNT(*) as cnt FROM {$table} WHERE rooster != '' GROUP BY rooster" );
+    $rows = $wpdb->get_results( "SELECT rooster, COUNT(*) as cnt FROM {$table} WHERE rooster != '' AND status != 'uitgeschreven' GROUP BY rooster" );
     foreach ( $rows as $row ) {
         if ( isset( $counts[ $row->rooster ] ) ) {
             $counts[ $row->rooster ] = (int) $row->cnt;
@@ -968,8 +1006,47 @@ function arrahma_send_confirmation_email( string $email, array $rows, string $su
     return arrahma_send_template_email( 'bevestiging', $email, $rows, $subject_prefix );
 }
 
-/** Verstuurt een HTML-e-mail met de vaste afzender. */
-function arrahma_wp_mail( string $to, string $subject, string $html ): bool {
+// ── Bijlagen bij bulkmail: alleen Word, Excel en PDF uit de mediabibliotheek.
+define( 'ARRAHMA_BIJLAGE_EXT',    [ 'pdf', 'doc', 'docx', 'xls', 'xlsx' ] );
+define( 'ARRAHMA_BIJLAGE_MAX',    5 );   // bestanden per e-mail
+define( 'ARRAHMA_BIJLAGE_MAX_MB', 10 );  // samen; veel mailservers weigeren grotere berichten
+
+/**
+ * Leest gekozen bijlagen (media-ids in $_POST['bijlagen']) en controleert ze.
+ * [ 'paden' => string[], 'namen' => string[], 'fout' => string ]. Een fout blokkeert het versturen.
+ */
+function arrahma_bijlagen_uit_request(): array {
+    $ids   = array_values( array_unique( array_filter( array_map( 'absint', (array) ( $_POST['bijlagen'] ?? [] ) ) ) ) );
+    $uit   = [ 'paden' => [], 'namen' => [], 'fout' => '' ];
+    if ( ! $ids ) return $uit;
+    if ( count( $ids ) > ARRAHMA_BIJLAGE_MAX ) {
+        $uit['fout'] = 'Maximaal ' . ARRAHMA_BIJLAGE_MAX . ' bijlagen per e-mail.';
+        return $uit;
+    }
+    $totaal = 0;
+    foreach ( $ids as $id ) {
+        $pad = get_post_type( $id ) === 'attachment' ? (string) get_attached_file( $id ) : '';
+        $ext = strtolower( pathinfo( $pad, PATHINFO_EXTENSION ) );
+        if ( $pad === '' || ! is_readable( $pad ) ) {
+            $uit['fout'] = 'Een gekozen bijlage bestaat niet meer in de mediabibliotheek.';
+            return $uit;
+        }
+        if ( ! in_array( $ext, ARRAHMA_BIJLAGE_EXT, true ) ) {
+            $uit['fout'] = basename( $pad ) . ' is geen Word-, Excel- of PDF-bestand.';
+            return $uit;
+        }
+        $totaal          += (int) filesize( $pad );
+        $uit['paden'][]  = $pad;
+        $uit['namen'][]  = basename( $pad );
+    }
+    if ( $totaal > ARRAHMA_BIJLAGE_MAX_MB * 1024 * 1024 ) {
+        $uit['fout'] = 'De bijlagen zijn samen groter dan ' . ARRAHMA_BIJLAGE_MAX_MB . ' MB. Veel mailservers weigeren dat.';
+    }
+    return $uit;
+}
+
+/** Verstuurt een HTML-e-mail met de vaste afzender, optioneel met bijlagen (bestandspaden). */
+function arrahma_wp_mail( string $to, string $subject, string $html, array $bijlagen = [] ): bool {
     $headers = [
         'Content-Type: text/html; charset=UTF-8',
         'From: Vereniging Arrahma <oudercomite@vereniging-arrahma.nl>',
@@ -977,7 +1054,7 @@ function arrahma_wp_mail( string $to, string $subject, string $html ): bool {
     // WordPress zet emoji in e-mails om naar afbeeldingen op s.w.org; veel mailprogramma's blokkeren
     // die, waardoor 📅 en 🕐 verdwijnen. Voor onze e-mails laten we de tekens gewoon staan.
     $had_filter = remove_filter( 'wp_mail', 'wp_staticize_emoji_for_email' );
-    $ok         = wp_mail( $to, $subject, $html, $headers );
+    $ok         = wp_mail( $to, $subject, $html, $headers, $bijlagen );
     if ( $had_filter ) add_filter( 'wp_mail', 'wp_staticize_emoji_for_email' );
     return (bool) $ok;
 }
@@ -1546,7 +1623,7 @@ function arrahma_render_email( string $key, string $email, array $rows, array $e
 }
 
 /** Verstuurt een e-mail op basis van de tekst met deze sleutel. */
-function arrahma_send_template_email( string $key, string $email, array $rows, string $subject_prefix = '', array $extra = [] ): bool {
+function arrahma_send_template_email( string $key, string $email, array $rows, string $subject_prefix = '', array $extra = [], array $bijlagen = [] ): bool {
     if ( empty( $rows ) || ! $email ) return false;
     $r = arrahma_render_email( $key, $email, $rows, $extra );
     if ( ! $r ) return false;
@@ -1558,7 +1635,7 @@ function arrahma_send_template_email( string $key, string $email, array $rows, s
         if ( empty( arrahma_email_templates()[ $key ]['builtin'] ) ) return false;
         $r = arrahma_render_email( $key, $email, $rows, $extra, true );
     }
-    return arrahma_wp_mail( $email, $subject_prefix . $r['onderwerp'], arrahma_email_wrap( $r['html'] ) );
+    return arrahma_wp_mail( $email, $subject_prefix . $r['onderwerp'], arrahma_email_wrap( $r['html'] ), $bijlagen );
 }
 
 /** Eenmalig: de correctiemail voor de zusters, voorheen in de code, als eigen e-mail opslaan. */
@@ -2000,7 +2077,7 @@ function arrahma_render_template_editor( string $key, array $t, string $notice, 
 function arrahma_email_recipients(): array {
     global $wpdb;
     $table = $wpdb->prefix . ARRAHMA_TABLE;
-    $rows  = $wpdb->get_results( "SELECT * FROM {$table} WHERE email != '' ORDER BY email, id" );
+    $rows  = $wpdb->get_results( "SELECT * FROM {$table} WHERE email != '' AND status != 'uitgeschreven' ORDER BY email, id" );
 
     $recipients = [];
     foreach ( $rows as $row ) {
@@ -2112,7 +2189,7 @@ function arrahma_sent_log( string $type, bool $leeg_cache = false ): array {
  * Gedeeld door het batchgewijze (AJAX) pad en het gewone formulier-pad, zodat beide precies
  * dezelfde regels volgen. Retourneert 'verstuurd', 'overgeslagen' of 'mislukt'.
  */
-function arrahma_send_to_recipient( array $recipient, string $type, string $doelgroep, bool $skip_sent ): string {
+function arrahma_send_to_recipient( array $recipient, string $type, string $doelgroep, bool $skip_sent, array $bijlagen = [] ): string {
     $rows = arrahma_rows_for_email_type( $recipient['rows'], $type, $doelgroep );
     if ( empty( $rows ) ) return 'overgeslagen';
 
@@ -2120,7 +2197,7 @@ function arrahma_send_to_recipient( array $recipient, string $type, string $doel
         return 'overgeslagen';
     }
 
-    $ok = arrahma_send_template_email( $type, $recipient['email'], $rows, '', [ 'doelgroep' => $doelgroep ] );
+    $ok = arrahma_send_template_email( $type, $recipient['email'], $rows, '', [ 'doelgroep' => $doelgroep ], $bijlagen );
 
     arrahma_log_email( $recipient['email'], $type, $doelgroep, count( $rows ), $ok );
     return $ok ? 'verstuurd' : 'mislukt';
@@ -2131,6 +2208,13 @@ function arrahma_send_to_recipient( array $recipient, string $type, string $doel
  * ontvangers, zodat er nooit één verzoek is dat langer duurt dan een krappe max_execution_time.
  */
 add_action( 'wp_ajax_arrahma_send_batch', 'arrahma_ajax_send_batch' );
+
+// De bijlagenkiezer gebruikt de WordPress-mediabibliotheek; alleen laden op de verzendpagina.
+add_action( 'admin_enqueue_scripts', function () {
+    if ( ( $_GET['page'] ?? '' ) === 'arrahma-emails' && current_user_can( 'manage_options' ) ) {
+        wp_enqueue_media();
+    }
+} );
 
 function arrahma_ajax_send_batch(): void {
     if ( ! current_user_can( 'manage_options' ) ) {
@@ -2155,6 +2239,10 @@ function arrahma_ajax_send_batch(): void {
     if ( count( $keys ) > ARRAHMA_BATCH_SIZE ) {
         wp_send_json_error( [ 'message' => 'Batch is te groot.' ], 400 );
     }
+    $bijlagen = arrahma_bijlagen_uit_request();
+    if ( $bijlagen['fout'] !== '' ) {
+        wp_send_json_error( [ 'message' => $bijlagen['fout'] ], 400 );
+    }
 
     $recipients = arrahma_email_recipients();
     $resultaat  = [ 'verstuurd' => 0, 'overgeslagen' => 0, 'mislukt' => [] ];
@@ -2163,7 +2251,7 @@ function arrahma_ajax_send_batch(): void {
         $key = strtolower( $key );
         if ( ! isset( $recipients[ $key ] ) ) { $resultaat['overgeslagen']++; continue; }
 
-        $status = arrahma_send_to_recipient( $recipients[ $key ], $type, $doelgroep, $skip_sent );
+        $status = arrahma_send_to_recipient( $recipients[ $key ], $type, $doelgroep, $skip_sent, $bijlagen['paden'] );
         if ( $status === 'mislukt' ) {
             $resultaat['mislukt'][] = $recipients[ $key ]['email'];
         } else {
@@ -2275,6 +2363,9 @@ add_action( 'admin_init', function () {
         if ( $id > 0 && wp_verify_nonce( $_GET['_wpnonce'], 'arrahma_delete_' . $id ) ) {
             global $wpdb;
             $wpdb->delete( $wpdb->prefix . ARRAHMA_TABLE, [ 'id' => $id ], [ '%d' ] );
+            // Aanwezigheid en notities horen bij de persoon: bij verwijderen gaan ze mee.
+            $wpdb->delete( $wpdb->prefix . ARRAHMA_AANWEZIG_TABLE, [ 'inschrijving_id' => $id ], [ '%d' ] );
+            $wpdb->delete( $wpdb->prefix . ARRAHMA_NOTITIE_TABLE, [ 'inschrijving_id' => $id ], [ '%d' ] );
             wp_redirect( admin_url( 'admin.php?page=arrahma-inschrijvingen&arrahma_deleted=1' ) );
             exit;
         }
@@ -2355,7 +2446,7 @@ function arrahma_rooster_count( string $rooster, int $exclude_id = 0 ): int {
     if ( $rooster === '' ) return 0;
     $table = $wpdb->prefix . ARRAHMA_TABLE;
     return (int) $wpdb->get_var( $wpdb->prepare(
-        "SELECT COUNT(*) FROM {$table} WHERE rooster = %s AND id != %d",
+        "SELECT COUNT(*) FROM {$table} WHERE rooster = %s AND id != %d AND status != 'uitgeschreven'",
         $rooster,
         $exclude_id
     ) );
@@ -2432,7 +2523,7 @@ function arrahma_render_edit_form( int $id ) {
         if ( $values['niveau'] !== '' && ! isset( arrahma_niveau_labels()[ $values['niveau'] ] ) ) {
             $errors[] = 'Ongeldig niveau.';
         }
-        if ( ! in_array( $values['status'], [ 'nieuw', 'verwerkt', 'afgewezen' ], true ) ) {
+        if ( ! in_array( $values['status'], arrahma_statussen(), true ) ) {
             $errors[] = 'Ongeldige status.';
         }
 
@@ -2584,7 +2675,7 @@ function arrahma_render_edit_form( int $id ) {
             <th scope="row"><label for="status">Status</label></th>
             <td>
               <select id="status" name="status">
-                <?php foreach ( [ 'nieuw', 'verwerkt', 'afgewezen' ] as $s ) : ?>
+                <?php foreach ( arrahma_statussen() as $s ) : ?>
                   <option value="<?= esc_attr( $s ) ?>" <?= selected( $values['status'], $s, false ) ?>><?= esc_html( ucfirst( $s ) ) ?></option>
                 <?php endforeach; ?>
               </select>
@@ -2707,7 +2798,7 @@ function arrahma_admin_page() {
     ) {
         $id     = intval( $_POST['entry_id'] );
         $status = sanitize_text_field( $_POST['new_status'] );
-        if ( in_array( $status, [ 'nieuw', 'verwerkt', 'afgewezen' ], true ) ) {
+        if ( in_array( $status, arrahma_statussen(), true ) ) {
             $wpdb->update( $table, [ 'status' => $status ], [ 'id' => $id ], [ '%s' ], [ '%d' ] );
             echo '<div class="notice notice-success is-dismissible"><p>Status bijgewerkt.</p></div>';
         }
@@ -2720,7 +2811,7 @@ function arrahma_admin_page() {
     $entries = $wpdb->get_results( "SELECT * FROM {$table} {$where} ORDER BY datum_inschrijving DESC" );
 
     $totals = $wpdb->get_results( "SELECT status, COUNT(*) as cnt FROM {$table} GROUP BY status" );
-    $counts = [ 'nieuw' => 0, 'verwerkt' => 0, 'afgewezen' => 0, 'totaal' => 0 ];
+    $counts = [ 'nieuw' => 0, 'verwerkt' => 0, 'afgewezen' => 0, 'uitgeschreven' => 0, 'totaal' => 0 ];
     foreach ( $totals as $row ) {
         $counts[ $row->status ] = (int) $row->cnt;
         $counts['totaal']      += (int) $row->cnt;
@@ -2736,6 +2827,7 @@ function arrahma_admin_page() {
         'nieuw'     => '#1976d2',
         'verwerkt'  => '#388e3c',
         'afgewezen' => '#d32f2f',
+        'uitgeschreven' => '#757575',
     ];
     ?>
     <div class="wrap">
@@ -2757,7 +2849,7 @@ function arrahma_admin_page() {
       <!-- Filter + Export -->
       <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:.75rem;flex-wrap:wrap;gap:.5rem">
         <div style="display:flex;gap:.35rem;flex-wrap:wrap">
-          <?php foreach ( [ '' => 'Alle', 'nieuw' => 'Nieuw', 'verwerkt' => 'Verwerkt', 'afgewezen' => 'Afgewezen' ] as $val => $lbl ) :
+          <?php foreach ( [ '' => 'Alle', 'nieuw' => 'Nieuw', 'verwerkt' => 'Verwerkt', 'afgewezen' => 'Afgewezen', 'uitgeschreven' => 'Uitgeschreven' ] as $val => $lbl ) :
               $active = $filter === $val ? 'button-primary' : '';
               $url    = admin_url( 'admin.php?page=arrahma-inschrijvingen' . ( $val ? '&status_filter=' . $val : '' ) );
           ?>
@@ -2839,7 +2931,7 @@ function arrahma_admin_page() {
                   <?php wp_nonce_field( 'arrahma_update_status' ); ?>
                   <input type="hidden" name="entry_id" value="<?= (int) $e->id ?>">
                   <select name="new_status" style="padding:3px 6px;font-size:.8rem;border-radius:4px;border:1px solid #ccc">
-                    <?php foreach ( [ 'nieuw', 'verwerkt', 'afgewezen' ] as $s ) : ?>
+                    <?php foreach ( arrahma_statussen() as $s ) : ?>
                     <option value="<?= $s ?>" <?= selected( $e->status, $s, false ) ?>><?= ucfirst( $s ) ?></option>
                     <?php endforeach; ?>
                   </select>
@@ -2949,6 +3041,8 @@ function arrahma_emails_page() {
             $result = [ 'error' => 'De tekst van deze e-mail bevat fouten. Los die eerst op onder Inschrijvingen → E-mailteksten.' ];
         } elseif ( empty( $selected ) ) {
             $result = [ 'error' => 'Selecteer minimaal één ontvanger.' ];
+        } elseif ( ( $bijlagen = arrahma_bijlagen_uit_request() )['fout'] !== '' ) {
+            $result = [ 'error' => $bijlagen['fout'] ];
         } else {
             // Terugvalpad zonder JavaScript. Normaal verstuurt de browser batchgewijs via AJAX;
             // dit pad doet alles in één verzoek en kan dus vastlopen op max_execution_time.
@@ -2961,7 +3055,7 @@ function arrahma_emails_page() {
                 $key = strtolower( $key );
                 if ( ! isset( $recipients[ $key ] ) ) continue;
 
-                $status = arrahma_send_to_recipient( $recipients[ $key ], $type, $doelgroep, $skip_sent );
+                $status = arrahma_send_to_recipient( $recipients[ $key ], $type, $doelgroep, $skip_sent, $bijlagen['paden'] );
                 if ( $status === 'verstuurd' )    $sent++;
                 elseif ( $status === 'mislukt' )  $mislukt++;
                 else                              $overgesl++;
@@ -2991,9 +3085,13 @@ function arrahma_emails_page() {
             $test_result = [ 'error' => 'De tekst van deze e-mail bevat fouten. Los die eerst op onder Inschrijvingen → E-mailteksten.' ];
         } elseif ( ! is_email( $test_email ) ) {
             $test_result = [ 'error' => 'Vul een geldig e-mailadres in.' ];
+        } elseif ( ( $test_bijlagen = arrahma_bijlagen_uit_request() )['fout'] !== '' ) {
+            $test_result = [ 'error' => $test_bijlagen['fout'] ];
         } else {
-            arrahma_send_template_email( $test_type, $test_email, [ arrahma_sample_row() ], '[TEST] ' );
-            $test_result = [ 'sent_to' => $test_email, 'label' => $types[ $test_type ] ];
+            $ok = arrahma_send_template_email( $test_type, $test_email, [ arrahma_sample_row() ], '[TEST] ', [], $test_bijlagen['paden'] );
+            $test_result = $ok
+                ? [ 'sent_to' => $test_email, 'label' => $types[ $test_type ], 'bijlagen' => $test_bijlagen['namen'] ]
+                : [ 'error' => 'De testmail kon niet worden verstuurd. Controleer de mailinstellingen van de site.' ];
         }
     }
 
@@ -3029,7 +3127,7 @@ function arrahma_emails_page() {
         <div class="notice notice-error is-dismissible"><p><?= esc_html( $test_result['error'] ) ?></p></div>
       <?php elseif ( isset( $test_result['sent_to'] ) ) : ?>
         <div class="notice notice-success is-dismissible"><p>
-          Testmail "<?= esc_html( $test_result['label'] ) ?>" verstuurd naar <?= esc_html( $test_result['sent_to'] ) ?> (met voorbeeldgegevens van de meest recente inschrijving).
+          Testmail "<?= esc_html( $test_result['label'] ) ?>" verstuurd naar <?= esc_html( $test_result['sent_to'] ) ?> (met voorbeeldgegevens van de meest recente inschrijving)<?php if ( ! empty( $test_result['bijlagen'] ) ) : ?>, met bijlage<?= count( $test_result['bijlagen'] ) > 1 ? 'n' : '' ?>: <?= esc_html( implode( ', ', $test_result['bijlagen'] ) ) ?><?php endif; ?>.
         </p></div>
       <?php endif; ?>
 
@@ -3040,6 +3138,7 @@ function arrahma_emails_page() {
         </p>
         <form method="post" style="display:flex;gap:.6rem;flex-wrap:wrap;align-items:center">
           <?php wp_nonce_field( 'arrahma_send_test', '_wpnonce_test' ); ?>
+          <span id="arrahma-test-bijlagen" hidden></span>
           <input type="email" name="test_email" required placeholder="jouw@email.nl" class="regular-text" style="min-width:220px">
           <?php foreach ( $email_types as $val => $meta ) : ?>
             <button type="submit" name="arrahma_send_test" value="<?= esc_attr( $val ) ?>" class="button" <?= ! empty( $problemen_per_type[ $val ] ) ? 'disabled title="Deze e-mail bevat fouten"' : '' ?>>Test: <?= esc_html( $meta['label'] ) ?></button>
@@ -3102,6 +3201,17 @@ function arrahma_emails_page() {
               <option value="<?= esc_attr( $cat ) ?>"><?= esc_html( arrahma_category_labels()[ $cat ] ?? $cat ) ?></option>
             <?php endforeach; ?>
           </select>
+
+          <h2 style="font-size:.8rem;text-transform:uppercase;letter-spacing:.08em;color:#2d3a4a;margin:1.5rem 0 .5rem">Bijlagen (optioneel)</h2>
+          <p style="color:#888;font-size:.85rem;margin:0 0 .5rem;max-width:680px">
+            Word, Excel of PDF uit de mediabibliotheek, maximaal <?= (int) ARRAHMA_BIJLAGE_MAX ?> bestanden en samen <?= (int) ARRAHMA_BIJLAGE_MAX_MB ?> MB.
+            Elke ontvanger krijgt dezelfde bijlagen; ze gaan ook mee met de testmail hierboven.
+            Let op: bestanden in de mediabibliotheek zijn via hun link openbaar — zet er geen persoonsgegevens in.
+          </p>
+          <div id="arrahma-bijlagen" style="margin-bottom:1.25rem;max-width:680px">
+            <ul id="arrahma-bijlagen-lijst" style="margin:0 0 .5rem;padding:0;list-style:none"></ul>
+            <button type="button" class="button" id="arrahma-bijlage-kies"><span class="dashicons dashicons-paperclip" style="margin-top:3px"></span> Bijlage kiezen</button>
+          </div>
 
           <label style="display:block;margin-bottom:1.25rem">
             <input type="checkbox" name="skip_sent" id="arrahma-skip-sent" value="1" checked>
@@ -3180,6 +3290,65 @@ function arrahma_emails_page() {
           var BATCH_SIZE = <?php echo (int) ARRAHMA_BATCH_SIZE; ?>;
           var AJAX_URL   = <?php echo wp_json_encode( admin_url( 'admin-ajax.php' ) ); ?>;
           var NONCE      = <?php echo wp_json_encode( wp_create_nonce( 'arrahma_send_emails' ) ); ?>;
+
+          // ── Bijlagen: kiezen uit de mediabibliotheek (alleen Word, Excel, PDF)
+          var BIJLAGE_MAX = <?php echo (int) ARRAHMA_BIJLAGE_MAX; ?>;
+          var BIJLAGE_MIME = [
+            'application/pdf', 'application/msword',
+            'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+            'application/vnd.ms-excel', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+          ];
+          var bijlagen = [];   // [{ id, naam, grootte }]
+          var kader;
+
+          function toonBijlagen() {
+            var lijst = document.getElementById('arrahma-bijlagen-lijst');
+            lijst.innerHTML = '';
+            bijlagen.forEach(function (b, i) {
+              var li = document.createElement('li');
+              li.style.cssText = 'display:flex;align-items:center;gap:.5rem;padding:.35rem .6rem;margin-bottom:.35rem;background:#f4f6f8;border-radius:6px';
+              li.innerHTML = '<span class="dashicons dashicons-media-document"></span><span style="flex:1"></span><span style="color:#888;font-size:.85em"></span>' +
+                             '<button type="button" class="button-link" style="color:#d32f2f">Verwijderen</button>';
+              li.children[1].textContent = b.naam;
+              li.children[2].textContent = b.grootte || '';
+              li.querySelector('button').addEventListener('click', function () { bijlagen.splice(i, 1); toonBijlagen(); });
+              lijst.appendChild(li);
+            });
+            // Verborgen velden in beide formulieren (verzenden en testmail), zodat ook het pad zonder JS ze meestuurt.
+            [form.querySelector('#arrahma-bijlagen'), document.getElementById('arrahma-test-bijlagen')].forEach(function (houder) {
+              if (!houder) return;
+              houder.querySelectorAll('input[name="bijlagen[]"]').forEach(function (el) { el.remove(); });
+              bijlagen.forEach(function (b) {
+                var inp = document.createElement('input');
+                inp.type = 'hidden'; inp.name = 'bijlagen[]'; inp.value = b.id;
+                houder.appendChild(inp);
+              });
+            });
+            document.getElementById('arrahma-bijlage-kies').disabled = bijlagen.length >= BIJLAGE_MAX;
+          }
+
+          document.getElementById('arrahma-bijlage-kies').addEventListener('click', function () {
+            if (!window.wp || !wp.media) { alert('De mediabibliotheek kon niet worden geladen. Herlaad de pagina.'); return; }
+            if (!kader) {
+              kader = wp.media({
+                title: 'Bijlage kiezen (Word, Excel of PDF)',
+                button: { text: 'Toevoegen als bijlage' },
+                multiple: 'add',
+                library: { type: BIJLAGE_MIME }
+              });
+              kader.on('select', function () {
+                kader.state().get('selection').each(function (m) {
+                  var a = m.toJSON();
+                  if (BIJLAGE_MIME.indexOf(a.mime) === -1) { alert(a.filename + ' is geen Word-, Excel- of PDF-bestand.'); return; }
+                  if (bijlagen.some(function (b) { return b.id === a.id; })) return;
+                  if (bijlagen.length >= BIJLAGE_MAX) { alert('Maximaal ' + BIJLAGE_MAX + ' bijlagen.'); return; }
+                  bijlagen.push({ id: a.id, naam: a.filename, grootte: a.filesizeHumanReadable });
+                });
+                toonBijlagen();
+              });
+            }
+            kader.open();
+          });
 
           function boxes() { return form.querySelectorAll('input[name="recipients[]"]'); }
           function checkedBoxes() { return form.querySelectorAll('input[name="recipients[]"]:checked'); }
@@ -3286,6 +3455,7 @@ function arrahma_emails_page() {
             body.append('doelgroep', dg);
             if (skip) body.append('skip_sent', '1');
             keys.forEach(function (k) { body.append('recipients[]', k); });
+            bijlagen.forEach(function (b) { body.append('bijlagen[]', b.id); });
 
             return fetch(AJAX_URL, { method: 'POST', credentials: 'same-origin', body: body })
               .then(function (res) { return res.json(); })
@@ -3309,7 +3479,8 @@ function arrahma_emails_page() {
             var skip  = document.getElementById('arrahma-skip-sent');
             var skipJa = skip ? skip.checked : false;
 
-            if (!confirm('Verstuur "' + label + '"' + dgTxt + ' naar ' + boxenAan.length +
+            var bijlTxt = bijlagen.length ? ' met ' + bijlagen.length + ' bijlage(n) (' + bijlagen.map(function (b) { return b.naam; }).join(', ') + ')' : ' zonder bijlagen';
+            if (!confirm('Verstuur "' + label + '"' + dgTxt + bijlTxt + ' naar ' + boxenAan.length +
                          ' ontvanger(s)? Dit gebeurt in blokken van ' + BATCH_SIZE + '.')) return;
 
             var keys    = boxenAan.map(function (cb) { return cb.value; });
@@ -3760,4 +3931,2439 @@ function arrahma_export_csv() {
     }
 
     fclose( $out );
+}
+
+// ─────────────────────────────────────────────────────────────
+// DOCENTENPORTAAL — aanwezigheid, notities, klassen en lesrooster
+// Spec: docs/specs/docenten-aanwezigheid.md
+//
+// Docenten werken op een gewone websitepagina met de shortcode [arrahma_docenten], nooit in
+// wp-admin. Beheerders (manage_options) zijn het bestuur en zien alles. De echte afscherming zit in
+// arrahma_mag_eenheid() en arrahma_mag_leerling(); de redirects weg van wp-admin zijn alleen gemak.
+// ─────────────────────────────────────────────────────────────
+define( 'ARRAHMA_AANWEZIG_TABLE',      'arrahma_aanwezigheid' );
+define( 'ARRAHMA_NOTITIE_TABLE',       'arrahma_notities' );
+define( 'ARRAHMA_DOCENT_ROLE',         'arrahma_docent' );
+define( 'ARRAHMA_DOCENT_CAP',          'arrahma_aanwezigheid' );
+define( 'ARRAHMA_DOCENT_META',         'arrahma_docent_eenheden' );
+define( 'ARRAHMA_KLASSEN_OPTION',      'arrahma_klassen' );
+define( 'ARRAHMA_VAKANTIES_OPTION',    'arrahma_vakanties' );
+define( 'ARRAHMA_LES_UITZ_OPTION',     'arrahma_les_uitzonderingen' );
+define( 'ARRAHMA_DOCENTEN_URL_OPTION', 'arrahma_docenten_url' );
+define( 'ARRAHMA_SIGNAAL_DREMPEL',     3 );    // keer "afwezig" (zonder bericht) …
+define( 'ARRAHMA_SIGNAAL_WEKEN',       8 );    // … binnen zoveel weken → op de signaallijst
+define( 'ARRAHMA_ZOEK_DAGEN',          70 );   // zo ver zoeken we naar een vorige/volgende les
+define( 'ARRAHMA_MAX_PERIODE_DAGEN',   190 );  // langste periode in het aanwezigheidsoverzicht
+define( 'ARRAHMA_NOTITIE_MAX',         2000 ); // tekens per notitie
+define( 'ARRAHMA_KLASNAAM_MAX',        60 );
+
+/** Statussen waarmee een inschrijving niet (meer) in een klas zit. */
+function arrahma_inactieve_statussen(): array {
+    return [ 'afgewezen', 'uitgeschreven' ];
+}
+
+// ── Rol en toegang ───────────────────────────────────────────
+
+/** Rol "Docent": alleen lezen + aanwezigheid. Idempotent, draait bij elke versie-update. */
+function arrahma_registreer_docent_rol(): void {
+    $rol = get_role( ARRAHMA_DOCENT_ROLE );
+    if ( ! $rol ) {
+        add_role( ARRAHMA_DOCENT_ROLE, 'Docent', [ 'read' => true, ARRAHMA_DOCENT_CAP => true ] );
+        return;
+    }
+    if ( ! $rol->has_cap( ARRAHMA_DOCENT_CAP ) ) {
+        $rol->add_cap( ARRAHMA_DOCENT_CAP );
+    }
+}
+
+/** Beheerders zijn het bestuur: alle groepen, klassen en notities. */
+function arrahma_is_bestuur(): bool {
+    return current_user_can( 'manage_options' );
+}
+
+/** Docent zonder beheerrechten — hoort wp-admin niet te zien. */
+function arrahma_is_alleen_docent(): bool {
+    return is_user_logged_in() && current_user_can( ARRAHMA_DOCENT_CAP ) && ! arrahma_is_bestuur();
+}
+
+/** Adres van de docentenpagina; de shortcode legt het vast zodra de pagina één keer is bekeken. */
+function arrahma_docenten_url(): string {
+    $url = (string) get_option( ARRAHMA_DOCENTEN_URL_OPTION, '' );
+    return $url !== '' ? $url : home_url( '/docenten/' );
+}
+
+add_filter( 'login_redirect', function ( $redirect_to, $requested, $user ) {
+    if ( $user instanceof WP_User && $user->has_cap( ARRAHMA_DOCENT_CAP ) && ! $user->has_cap( 'manage_options' ) ) {
+        return arrahma_docenten_url();
+    }
+    return $redirect_to;
+}, 10, 3 );
+
+function arrahma_stuur_docent_weg_uit_admin(): void {
+    if ( wp_doing_ajax() || ! arrahma_is_alleen_docent() ) return;
+    wp_safe_redirect( arrahma_docenten_url() );
+    exit;
+}
+add_action( 'admin_init', 'arrahma_stuur_docent_weg_uit_admin' );
+// Beheerpagina's waar de docent geen recht op heeft, weigert WordPress al vóór admin_init.
+add_action( 'admin_page_access_denied', 'arrahma_stuur_docent_weg_uit_admin' );
+
+add_filter( 'show_admin_bar', function ( $show ) {
+    return arrahma_is_alleen_docent() ? false : $show;
+} );
+
+// ── Klassen en eenheden ──────────────────────────────────────
+
+/** [ klas_id => [ 'slot' => string, 'naam' => string ] ], in aanmaakvolgorde. */
+function arrahma_klassen(): array {
+    $klassen = get_option( ARRAHMA_KLASSEN_OPTION, [] );
+    return is_array( $klassen ) ? $klassen : [];
+}
+
+/** Klassen binnen één lesblok/lesgroep: [ klas_id => naam ]. */
+function arrahma_klassen_van_slot( string $slot ): array {
+    $uit = [];
+    foreach ( arrahma_klassen() as $id => $klas ) {
+        if ( ( $klas['slot'] ?? '' ) === $slot ) {
+            $uit[ $id ] = (string) $klas['naam'];
+        }
+    }
+    return $uit;
+}
+
+/** Leesbare naam van een lesblok/lesgroep inclusief doelgroep, bijv. "Broeders 17+ · Zondag 09:30–11:00 — Niveau 1…". */
+function arrahma_slot_naam( string $slot ): string {
+    $groep = arrahma_groepen()[ $slot ] ?? null;
+    $doelgroep = $groep ? arrahma_category_short_label( $groep['categorie'] ) : 'Kinderen';
+    return $doelgroep . ' · ' . arrahma_roster_label( $slot );
+}
+
+/**
+ * Een eenheid is waar een docent aan hangt en waarvoor aanwezigheid wordt bijgehouden:
+ * een heel lesblok/lesgroep (sleutel = slot-sleutel) of één klas daarbinnen (sleutel = klas-id).
+ * Zonder klassen is het hele blok de klas.
+ */
+function arrahma_eenheid( string $sleutel ): ?array {
+    $slots   = arrahma_roster_labels();
+    $klassen = arrahma_klassen();
+
+    if ( isset( $klassen[ $sleutel ] ) ) {
+        $slot = (string) $klassen[ $sleutel ]['slot'];
+        if ( ! isset( $slots[ $slot ] ) ) return null;
+        return [
+            'sleutel' => $sleutel,
+            'slot'    => $slot,
+            'klas'    => $sleutel,
+            'label'   => arrahma_slot_naam( $slot ) . ' — ' . $klassen[ $sleutel ]['naam'],
+        ];
+    }
+    if ( isset( $slots[ $sleutel ] ) ) {
+        $heeft_klassen = (bool) arrahma_klassen_van_slot( $sleutel );
+        return [
+            'sleutel' => $sleutel,
+            'slot'    => $sleutel,
+            'klas'    => '',
+            'label'   => arrahma_slot_naam( $sleutel ) . ( $heeft_klassen ? ' — alle klassen' : '' ),
+        ];
+    }
+    return null;
+}
+
+/** Alle eenheden: per blok/groep eerst het geheel, dan de klassen. */
+function arrahma_alle_eenheden(): array {
+    $uit = [];
+    foreach ( array_keys( arrahma_roster_labels() ) as $slot ) {
+        $uit[ $slot ] = arrahma_eenheid( $slot );
+        foreach ( array_keys( arrahma_klassen_van_slot( $slot ) ) as $klas_id ) {
+            $eenheid = arrahma_eenheid( $klas_id );
+            if ( $eenheid ) $uit[ $klas_id ] = $eenheid;
+        }
+    }
+    return $uit;
+}
+
+/** Eenheden waaraan een docent gekoppeld is; verwijderde klassen vallen er vanzelf uit. */
+function arrahma_docent_eenheden( int $user_id ): array {
+    $sleutels = get_user_meta( $user_id, ARRAHMA_DOCENT_META, true );
+    $uit = [];
+    foreach ( is_array( $sleutels ) ? $sleutels : [] as $sleutel ) {
+        $eenheid = arrahma_eenheid( (string) $sleutel );
+        if ( $eenheid ) $uit[ $eenheid['sleutel'] ] = $eenheid;
+    }
+    return $uit;
+}
+
+function arrahma_eenheden_voor_gebruiker(): array {
+    if ( arrahma_is_bestuur() ) return arrahma_alle_eenheden();
+    if ( ! current_user_can( ARRAHMA_DOCENT_CAP ) ) return [];
+    return arrahma_docent_eenheden( get_current_user_id() );
+}
+
+function arrahma_mag_eenheid( string $sleutel ): ?array {
+    $eenheden = arrahma_eenheden_voor_gebruiker();
+    return $eenheden[ $sleutel ] ?? null;
+}
+
+/** Actieve leerlingen van een blok/groep, op naam. */
+function arrahma_leerlingen_van_slot( string $slot ): array {
+    global $wpdb;
+    $table = $wpdb->prefix . ARRAHMA_TABLE;
+    return $wpdb->get_results( $wpdb->prepare(
+        "SELECT * FROM {$table} WHERE rooster = %s AND status NOT IN ('afgewezen','uitgeschreven') ORDER BY voornaam, achternaam",
+        $slot
+    ) );
+}
+
+/**
+ * Leerlingen van een eenheid in secties [ [ 'titel' => string, 'rijen' => object[] ] ].
+ * Wie in een blok met klassen nog niet is ingedeeld, staat onderaan bij elke klas van dat blok,
+ * zodat niemand bij het aanwezigheid opnemen tussen wal en schip valt.
+ */
+function arrahma_eenheid_secties( array $eenheid ): array {
+    $rijen   = arrahma_leerlingen_van_slot( $eenheid['slot'] );
+    $klassen = arrahma_klassen_van_slot( $eenheid['slot'] );
+    if ( ! $klassen ) {
+        return [ [ 'titel' => '', 'rijen' => $rijen ] ];
+    }
+
+    $per_klas = [];
+    $zonder   = [];
+    foreach ( $rijen as $rij ) {
+        $klas = (string) ( $rij->klas ?? '' );
+        if ( isset( $klassen[ $klas ] ) ) {
+            $per_klas[ $klas ][] = $rij;
+        } else {
+            $zonder[] = $rij;
+        }
+    }
+
+    $secties = [];
+    if ( $eenheid['klas'] !== '' ) {
+        $secties[] = [ 'titel' => '', 'rijen' => $per_klas[ $eenheid['klas'] ] ?? [] ];
+    } else {
+        foreach ( $klassen as $id => $naam ) {
+            $secties[] = [ 'titel' => $naam, 'rijen' => $per_klas[ $id ] ?? [] ];
+        }
+    }
+    if ( $zonder ) {
+        $secties[] = [ 'titel' => 'Nog niet in een klas', 'rijen' => $zonder ];
+    }
+    return $secties;
+}
+
+function arrahma_aantal_in_secties( array $secties ): int {
+    $n = 0;
+    foreach ( $secties as $sectie ) $n += count( $sectie['rijen'] );
+    return $n;
+}
+
+/** Mag de huidige gebruiker deze leerling zien en bijwerken? */
+function arrahma_mag_leerling( $rij ): bool {
+    if ( ! $rij ) return false;
+    if ( arrahma_is_bestuur() ) return true;
+    if ( ! current_user_can( ARRAHMA_DOCENT_CAP ) ) return false;
+    if ( in_array( $rij->status, arrahma_inactieve_statussen(), true ) ) return false;
+
+    $slot    = (string) $rij->rooster;
+    $klas    = (string) ( $rij->klas ?? '' );
+    $klassen = arrahma_klassen_van_slot( $slot );
+    foreach ( arrahma_docent_eenheden( get_current_user_id() ) as $eenheid ) {
+        if ( $eenheid['slot'] !== $slot ) continue;
+        if ( $eenheid['klas'] === '' || $eenheid['klas'] === $klas || ! isset( $klassen[ $klas ] ) ) {
+            return true;
+        }
+    }
+    return false;
+}
+
+function arrahma_haal_inschrijving( int $id ) {
+    global $wpdb;
+    if ( $id <= 0 ) return null;
+    $table = $wpdb->prefix . ARRAHMA_TABLE;
+    return $wpdb->get_row( $wpdb->prepare( "SELECT * FROM {$table} WHERE id = %d", $id ) );
+}
+
+// ── Lesrooster ───────────────────────────────────────────────
+
+function arrahma_vandaag(): string {
+    return current_time( 'Y-m-d' );
+}
+
+function arrahma_geldige_datum( string $datum ): bool {
+    if ( ! preg_match( '/^(\d{4})-(\d{2})-(\d{2})$/', $datum, $m ) ) return false;
+    return checkdate( (int) $m[2], (int) $m[3], (int) $m[1] );
+}
+
+function arrahma_verschuif_datum( string $datum, int $dagen ): string {
+    return ( new DateTimeImmutable( $datum ) )->modify( sprintf( '%+d days', $dagen ) )->format( 'Y-m-d' );
+}
+
+/** "maandag 5 oktober 2026" in de taal van de site. */
+function arrahma_datum_lang( string $datum ): string {
+    return date_i18n( 'l j F Y', strtotime( $datum . ' 12:00:00' ) );
+}
+
+function arrahma_datum_kort( string $datum ): string {
+    return date_i18n( 'D j M', strtotime( $datum . ' 12:00:00' ) );
+}
+
+/** ISO-weekdagen (1 = maandag) uit de dag-tekst van een blok/groep; "Zaterdag & zondag" geeft [6, 7]. */
+function arrahma_slot_weekdagen( string $slot ): array {
+    $dag   = strtolower( arrahma_slot_dag_tijd( $slot )['dag'] );
+    $namen = [ 'maandag' => 1, 'dinsdag' => 2, 'woensdag' => 3, 'donderdag' => 4, 'vrijdag' => 5, 'zaterdag' => 6, 'zondag' => 7 ];
+    $uit   = [];
+    foreach ( $namen as $naam => $nummer ) {
+        if ( strpos( $dag, $naam ) !== false ) $uit[] = $nummer;
+    }
+    return $uit;
+}
+
+/**
+ * [ [ 'naam' => string, 'van' => Y-m-d, 'tot' => Y-m-d, 'slots' => string[] ] ], op begindatum.
+ * 'slots' leeg of afwezig = voor alle groepen; anders alleen voor die blokken/lesgroepen.
+ */
+function arrahma_vakanties(): array {
+    $vakanties = get_option( ARRAHMA_VAKANTIES_OPTION, [] );
+    $vakanties = is_array( $vakanties ) ? array_values( $vakanties ) : [];
+    usort( $vakanties, function ( $a, $b ) { return strcmp( $a['van'], $b['van'] ); } );
+    return $vakanties;
+}
+
+/** [ [ 'slot' => string, 'datum' => Y-m-d, 'soort' => 'vervalt'|'extra' ] ], op datum. */
+function arrahma_les_uitzonderingen(): array {
+    $lijst = get_option( ARRAHMA_LES_UITZ_OPTION, [] );
+    $lijst = is_array( $lijst ) ? array_values( $lijst ) : [];
+    usort( $lijst, function ( $a, $b ) { return strcmp( $a['datum'], $b['datum'] ); } );
+    return $lijst;
+}
+
+/** Geldt een vakantie voor dit blok? */
+function arrahma_vakantie_geldt( array $vakantie, string $slot ): bool {
+    return empty( $vakantie['slots'] ) || in_array( $slot, (array) $vakantie['slots'], true );
+}
+
+/** Voor wie een vakantie geldt, leesbaar: "Alle groepen", "Kinderen (alle blokken)" of een opsomming. */
+function arrahma_vakantie_bereik( array $vakantie ): string {
+    if ( empty( $vakantie['slots'] ) ) return 'Alle groepen';
+    $per_doelgroep = [];
+    foreach ( array_keys( arrahma_roster_labels() ) as $slot ) {
+        $per_doelgroep[ arrahma_slot_doelgroep( $slot ) ][] = $slot;
+    }
+    $delen = [];
+    foreach ( $per_doelgroep as $doelgroep => $slots ) {
+        $gekozen = array_values( array_intersect( $slots, (array) $vakantie['slots'] ) );
+        if ( ! $gekozen ) continue;
+        $delen[] = count( $gekozen ) === count( $slots )
+            ? $doelgroep . ' (alles)'
+            : $doelgroep . ': ' . implode( ', ', array_map( 'arrahma_roster_label', $gekozen ) );
+    }
+    return implode( ' · ', $delen );
+}
+
+/**
+ * Is er les? [ 'les' => bool, 'reden' => string ].
+ * Volgorde: uitzondering voor dit blok > weekdag > vakantie. Er is geen begin- of einddatum:
+ * de kalender loopt het hele jaar door.
+ */
+function arrahma_lesdag_info( string $slot, string $datum ): array {
+    foreach ( arrahma_les_uitzonderingen() as $u ) {
+        if ( $u['slot'] === $slot && $u['datum'] === $datum ) {
+            return $u['soort'] === 'extra'
+                ? [ 'les' => true,  'reden' => 'Extra les' ]
+                : [ 'les' => false, 'reden' => 'Deze les vervalt.' ];
+        }
+    }
+
+    $weekdag = (int) ( new DateTimeImmutable( $datum ) )->format( 'N' );
+    if ( ! in_array( $weekdag, arrahma_slot_weekdagen( $slot ), true ) ) {
+        return [ 'les' => false, 'reden' => 'Op deze dag heeft deze groep geen les.' ];
+    }
+
+    foreach ( arrahma_vakanties() as $vakantie ) {
+        if ( $datum >= $vakantie['van'] && $datum <= $vakantie['tot'] && arrahma_vakantie_geldt( $vakantie, $slot ) ) {
+            return [ 'les' => false, 'reden' => 'Geen les: ' . $vakantie['naam'] . '.' ];
+        }
+    }
+    return [ 'les' => true, 'reden' => '' ];
+}
+
+function arrahma_is_lesdag( string $slot, string $datum ): bool {
+    return arrahma_lesdag_info( $slot, $datum )['les'];
+}
+
+/** Dichtstbijzijnde les vóór (richting -1) of na (+1) een datum, of null. */
+function arrahma_zoek_les( string $slot, string $vanaf, int $richting ): ?string {
+    for ( $i = 1; $i <= ARRAHMA_ZOEK_DAGEN; $i++ ) {
+        $datum = arrahma_verschuif_datum( $vanaf, $i * $richting );
+        if ( arrahma_is_lesdag( $slot, $datum ) ) return $datum;
+    }
+    return null;
+}
+
+/** De les van vandaag, anders de laatst verstreken les. */
+function arrahma_standaard_lesdatum( string $slot ): string {
+    $vandaag = arrahma_vandaag();
+    if ( arrahma_is_lesdag( $slot, $vandaag ) ) return $vandaag;
+    return arrahma_zoek_les( $slot, $vandaag, -1 ) ?? $vandaag;
+}
+
+function arrahma_lesdata_in_periode( string $slot, string $van, string $tot ): array {
+    $uit = [];
+    for ( $datum = $van; $datum <= $tot; $datum = arrahma_verschuif_datum( $datum, 1 ) ) {
+        if ( arrahma_is_lesdag( $slot, $datum ) ) $uit[] = $datum;
+    }
+    return $uit;
+}
+
+// ── Aanwezigheid ─────────────────────────────────────────────
+
+function arrahma_aanwezig_statussen(): array {
+    return [ 'aanwezig' => 'Aanwezig', 'te_laat' => 'Te laat', 'afgemeld' => 'Afgemeld', 'afwezig' => 'Afwezig' ];
+}
+
+function arrahma_aanwezig_kleuren(): array {
+    return [ 'aanwezig' => '#2e7d32', 'te_laat' => '#9a6a10', 'afgemeld' => '#323f44', 'afwezig' => '#c62828' ];
+}
+
+/** Eén letter per status voor het overzicht: A, L, M, X. */
+function arrahma_aanwezig_letters(): array {
+    return [ 'aanwezig' => 'A', 'te_laat' => 'L', 'afgemeld' => 'M', 'afwezig' => 'X' ];
+}
+
+/** [ inschrijving_id => status ] voor één les. */
+function arrahma_aanwezigheid_op( string $slot, string $datum ): array {
+    global $wpdb;
+    $table = $wpdb->prefix . ARRAHMA_AANWEZIG_TABLE;
+    $rows  = $wpdb->get_results( $wpdb->prepare(
+        "SELECT inschrijving_id, status FROM {$table} WHERE rooster = %s AND lesdatum = %s",
+        $slot, $datum
+    ) );
+    $uit = [];
+    foreach ( $rows as $row ) $uit[ (int) $row->inschrijving_id ] = $row->status;
+    return $uit;
+}
+
+/** Zet of wist (status '') de aanwezigheid van één leerling voor één les. */
+function arrahma_zet_aanwezigheid( int $inschrijving_id, string $slot, string $datum, string $status ): bool {
+    global $wpdb;
+    $table = $wpdb->prefix . ARRAHMA_AANWEZIG_TABLE;
+
+    if ( $status === '' ) {
+        return false !== $wpdb->delete( $table, [ 'inschrijving_id' => $inschrijving_id, 'lesdatum' => $datum, 'rooster' => $slot ], [ '%d', '%s', '%s' ] );
+    }
+    return false !== $wpdb->query( $wpdb->prepare(
+        "INSERT INTO {$table} (inschrijving_id, rooster, lesdatum, status, door, gewijzigd_op)
+         VALUES (%d, %s, %s, %s, %d, %s)
+         ON DUPLICATE KEY UPDATE status = VALUES(status), door = VALUES(door), gewijzigd_op = VALUES(gewijzigd_op)",
+        $inschrijving_id, $slot, $datum, $status, get_current_user_id(), current_time( 'mysql' )
+    ) );
+}
+
+add_action( 'wp_ajax_arrahma_aanwezigheid', 'arrahma_ajax_aanwezigheid' );
+
+function arrahma_ajax_aanwezigheid(): void {
+    check_ajax_referer( 'arrahma_aanwezigheid', 'nonce' );
+
+    $id     = absint( $_POST['inschrijving_id'] ?? 0 );
+    $datum  = sanitize_text_field( wp_unslash( $_POST['datum'] ?? '' ) );
+    $status = sanitize_key( wp_unslash( $_POST['status'] ?? '' ) );
+    $rij    = arrahma_haal_inschrijving( $id );
+
+    if ( ! arrahma_mag_leerling( $rij ) ) {
+        wp_send_json_error( [ 'bericht' => 'Je hebt geen toegang tot deze leerling.' ], 403 );
+    }
+    if ( ! arrahma_geldige_datum( $datum ) || ! arrahma_is_lesdag( $rij->rooster, $datum ) ) {
+        wp_send_json_error( [ 'bericht' => 'Op deze datum is geen les.' ], 400 );
+    }
+    if ( $datum > arrahma_vandaag() ) {
+        wp_send_json_error( [ 'bericht' => 'Deze les is nog niet geweest.' ], 400 );
+    }
+    if ( $status !== '' && ! isset( arrahma_aanwezig_statussen()[ $status ] ) ) {
+        wp_send_json_error( [ 'bericht' => 'Onbekende status.' ], 400 );
+    }
+    if ( ! arrahma_zet_aanwezigheid( $id, $rij->rooster, $datum, $status ) ) {
+        wp_send_json_error( [ 'bericht' => 'Opslaan mislukt, probeer het opnieuw.' ], 500 );
+    }
+    wp_send_json_success( [ 'status' => $status ] );
+}
+
+// ── Notities ─────────────────────────────────────────────────
+
+function arrahma_notities_van( int $inschrijving_id ): array {
+    global $wpdb;
+    $table = $wpdb->prefix . ARRAHMA_NOTITIE_TABLE;
+    return $wpdb->get_results( $wpdb->prepare(
+        "SELECT * FROM {$table} WHERE inschrijving_id = %d ORDER BY aangemaakt_op DESC, id DESC",
+        $inschrijving_id
+    ) );
+}
+
+function arrahma_gebruiker_naam( int $user_id ): string {
+    $user = $user_id ? get_userdata( $user_id ) : false;
+    return $user ? $user->display_name : 'Onbekend';
+}
+
+function arrahma_mag_notitie_wijzigen( $notitie ): bool {
+    return $notitie && ( arrahma_is_bestuur() || (int) $notitie->auteur === get_current_user_id() );
+}
+
+/**
+ * Verwerkt notitie-formulieren van de docentenpagina (toevoegen, wijzigen, verwijderen) en stuurt
+ * daarna terug naar dezelfde leerling (post/redirect/get, zodat verversen niets dubbel opslaat).
+ */
+add_action( 'template_redirect', 'arrahma_verwerk_notitie_post' );
+
+function arrahma_verwerk_notitie_post(): void {
+    if ( empty( $_POST['arrahma_notitie_actie'] ) || ! is_user_logged_in() ) return;
+    global $wpdb;
+
+    $actie    = sanitize_key( wp_unslash( $_POST['arrahma_notitie_actie'] ) );
+    $leerling = absint( $_POST['leerling'] ?? 0 );
+    $eenheid  = sanitize_key( wp_unslash( $_POST['eenheid'] ?? '' ) );
+    $basis    = get_permalink( get_queried_object_id() ) ?: arrahma_docenten_url();
+    $terug    = add_query_arg( array_filter( [ 'leerling' => $leerling, 'eenheid' => $eenheid ] ), $basis );
+    $klaar    = function ( string $melding ) use ( $terug ) {
+        wp_safe_redirect( add_query_arg( 'melding', $melding, $terug ) . '#notities' );
+        exit;
+    };
+
+    $nonce = sanitize_text_field( wp_unslash( $_POST['_arrahma_nonce'] ?? '' ) );
+    if ( ! wp_verify_nonce( $nonce, 'arrahma_notitie_' . $leerling ) ) $klaar( 'verlopen' );
+    if ( ! arrahma_mag_leerling( arrahma_haal_inschrijving( $leerling ) ) ) $klaar( 'geen_toegang' );
+
+    $table = $wpdb->prefix . ARRAHMA_NOTITIE_TABLE;
+    $tekst = trim( sanitize_textarea_field( wp_unslash( $_POST['tekst'] ?? '' ) ) );
+    $tekst = function_exists( 'mb_substr' ) ? mb_substr( $tekst, 0, ARRAHMA_NOTITIE_MAX ) : substr( $tekst, 0, ARRAHMA_NOTITIE_MAX );
+
+    if ( $actie === 'toevoegen' ) {
+        if ( $tekst === '' ) $klaar( 'leeg' );
+        $ok = $wpdb->insert( $table, [
+            'inschrijving_id' => $leerling,
+            'tekst'           => $tekst,
+            'auteur'          => get_current_user_id(),
+            'aangemaakt_op'   => current_time( 'mysql' ),
+        ], [ '%d', '%s', '%d', '%s' ] );
+        $klaar( $ok ? 'toegevoegd' : 'mislukt' );
+    }
+
+    $notitie = $wpdb->get_row( $wpdb->prepare(
+        "SELECT * FROM {$table} WHERE id = %d AND inschrijving_id = %d",
+        absint( $_POST['notitie'] ?? 0 ), $leerling
+    ) );
+    if ( ! arrahma_mag_notitie_wijzigen( $notitie ) ) $klaar( 'geen_toegang' );
+
+    if ( $actie === 'wijzigen' ) {
+        if ( $tekst === '' ) $klaar( 'leeg' );
+        $ok = $wpdb->update( $table, [ 'tekst' => $tekst, 'gewijzigd_op' => current_time( 'mysql' ) ], [ 'id' => $notitie->id ], [ '%s', '%s' ], [ '%d' ] );
+        $klaar( false !== $ok ? 'gewijzigd' : 'mislukt' );
+    }
+    if ( $actie === 'verwijderen' ) {
+        $ok = $wpdb->delete( $table, [ 'id' => $notitie->id ], [ '%d' ] );
+        $klaar( $ok ? 'verwijderd' : 'mislukt' );
+    }
+    $klaar( 'mislukt' );
+}
+
+// ── Docentenpagina (shortcode) ───────────────────────────────
+// Ontwerp: artifact "Arrahma Docentenportaal" (zie docs/specs/docenten-aanwezigheid.md).
+// Schermen: Mijn groepen · Presentielijst · Kalender · Leerling · Maandoverzicht bestuur.
+define( 'ARRAHMA_OPEN_DAGEN', 28 );                               // zo ver terug zoekt "Nog in te vullen"
+define( 'ARRAHMA_OPEN_MAX',   6 );                                // zoveel open lessen op Mijn groepen
+define( 'ARRAHMA_LOGO_PAD',   '2024/02/Arrahma-Logo-300x213.png' ); // websitelogo in wp-content/uploads
+
+add_shortcode( 'arrahma_docenten', 'arrahma_docenten_shortcode' );
+
+/** Body-klasse op de docentenpagina, zodat de CSS de paginamarges van thema en Elementor kan weghalen. */
+add_filter( 'body_class', function ( array $klassen ): array {
+    if ( ! is_singular() ) return $klassen;
+    $id   = (int) get_queried_object_id();
+    $post = get_post( $id );
+    $raak = $post && (
+        has_shortcode( (string) $post->post_content, 'arrahma_docenten' )
+        || strpos( (string) get_post_meta( $id, '_elementor_data', true ), 'arrahma_docenten' ) !== false
+        || get_permalink( $id ) === get_option( ARRAHMA_DOCENTEN_URL_OPTION )
+    );
+    if ( $raak ) $klassen[] = 'arr-docentenpagina';
+    return $klassen;
+} );
+
+function arrahma_docenten_shortcode(): string {
+    if ( ! defined( 'DONOTCACHEPAGE' ) ) define( 'DONOTCACHEPAGE', true ); // persoonlijke inhoud: nooit cachen
+
+    $basis = (string) get_permalink();
+    if ( $basis !== '' && $basis !== get_option( ARRAHMA_DOCENTEN_URL_OPTION ) ) {
+        update_option( ARRAHMA_DOCENTEN_URL_OPTION, $basis, false );
+    }
+
+    $scherm = 'overzicht';
+    $GLOBALS['arrahma_hoofd_open'] = false;
+    ob_start();
+    if ( ! is_user_logged_in() ) {
+        $scherm = 'login';
+        arrahma_docenten_login( $basis );
+    } elseif ( ! current_user_can( ARRAHMA_DOCENT_CAP ) && ! arrahma_is_bestuur() ) {
+        arrahma_docenten_kop( [ 'boven' => 'Docenten', 'titel' => 'Geen toegang' ] );
+        arrahma_docenten_leeg( 'link', 'Dit is geen docentaccount', 'Neem contact op met het bestuur als je lesgeeft en toegang nodig hebt.',
+            wp_logout_url( $basis ), 'Uitloggen' );
+    } else {
+        $leerling = absint( $_GET['leerling'] ?? 0 );
+        $sleutel  = sanitize_key( wp_unslash( $_GET['eenheid'] ?? '' ) );
+        $weergave = sanitize_key( wp_unslash( $_GET['weergave'] ?? '' ) );
+        $eenheden = arrahma_eenheden_voor_gebruiker();
+
+        if ( $leerling ) {
+            $scherm = 'leerling';
+            arrahma_docenten_leerling( $basis, $leerling, $sleutel );
+        } elseif ( ! empty( $_GET['bestuur'] ) && arrahma_is_bestuur() ) {
+            $scherm = 'bestuur';
+            arrahma_docenten_bestuur( $basis );
+        } elseif ( $sleutel !== '' ) {
+            $scherm = $weergave === 'kalender' ? 'kalender' : 'lijst';
+            $weergave === 'kalender' ? arrahma_docenten_kalender( $basis, $sleutel ) : arrahma_docenten_presentie( $basis, $sleutel );
+        } else {
+            arrahma_docenten_overzicht( $basis, $eenheden );
+        }
+    }
+    if ( ! empty( $GLOBALS['arrahma_hoofd_open'] ) ) echo '</div>'; // .arr-hoofd, geopend door de kop
+    $inhoud = (string) ob_get_clean();
+
+    return arrahma_docenten_css() . arrahma_docenten_iconen()
+        . '<div class="arr-doc scherm-' . esc_attr( $scherm ) . '">' . $inhoud . '</div>';
+}
+
+// ── Kleine bouwstenen ────────────────────────────────────────
+
+function arrahma_icoon( string $naam, int $maat = 18 ): string {
+    return '<svg class="arr-i" width="' . $maat . '" height="' . $maat . '" aria-hidden="true" focusable="false"><use href="#arr-i-' . esc_attr( $naam ) . '"/></svg>';
+}
+
+/** Doelgroep van een blok/groep, bijv. "Kinderen" of "Broeders 17+". */
+function arrahma_slot_doelgroep( string $slot ): string {
+    $groep = arrahma_groepen()[ $slot ] ?? null;
+    return $groep ? arrahma_category_short_label( $groep['categorie'] ) : 'Kinderen';
+}
+
+/** Begin- en eindtijd uit "15:30–17:30". */
+function arrahma_slot_tijden( string $slot ): array {
+    $delen = preg_split( '/\s*[–-]\s*/u', arrahma_slot_dag_tijd( $slot )['tijd'] );
+    return [ 'start' => trim( $delen[0] ?? '' ), 'eind' => trim( $delen[1] ?? '' ) ];
+}
+
+/** Hoe een eenheid heet op het scherm: bovenschrift (doelgroep), titel (klas/niveau/blok) en regel (dag · tijd). */
+function arrahma_eenheid_weergave( array $eenheid ): array {
+    $slot = $eenheid['slot'];
+    $dt   = arrahma_slot_dag_tijd( $slot );
+    if ( $eenheid['klas'] !== '' ) {
+        $titel = arrahma_klassen_van_slot( $slot )[ $eenheid['klas'] ] ?? '';
+    } elseif ( isset( arrahma_groepen()[ $slot ] ) ) {
+        $titel = arrahma_niveau_label( arrahma_groepen()[ $slot ]['niveau'] );
+    } else {
+        $blok  = arrahma_kinderen_blokken()[ $slot ] ?? [];
+        $titel = isset( $blok['blok'] ) ? ucfirst( $blok['blok'] ) : $dt['dag'];
+    }
+    if ( $eenheid['klas'] === '' && arrahma_klassen_van_slot( $slot ) ) {
+        $titel .= ' · alle klassen';
+    }
+    return [ 'boven' => arrahma_slot_doelgroep( $slot ), 'titel' => $titel, 'sub' => $dt['dag'] . ' · ' . $dt['tijd'] ];
+}
+
+function arrahma_initialen( string $naam ): string {
+    $uit = '';
+    foreach ( preg_split( '/\s+/u', trim( $naam ) ) as $woord ) {
+        if ( $woord === '' ) continue;
+        $uit .= function_exists( 'mb_substr' ) ? mb_substr( $woord, 0, 1 ) : substr( $woord, 0, 1 );
+        if ( ( function_exists( 'mb_strlen' ) ? mb_strlen( $uit ) : strlen( $uit ) ) >= 2 ) break;
+    }
+    return function_exists( 'mb_strtoupper' ) ? mb_strtoupper( $uit ) : strtoupper( $uit );
+}
+
+function arrahma_datum_titel( string $datum ): string {
+    return ucfirst( date_i18n( 'l j F', strtotime( $datum . ' 12:00:00' ) ) );
+}
+
+function arrahma_weekdag_kort( string $datum ): string {
+    return ucfirst( date_i18n( 'D', strtotime( $datum . ' 12:00:00' ) ) );
+}
+
+/** URL naar een scherm van de docentenpagina. */
+function arrahma_docenten_link( string $basis, array $args ): string {
+    return add_query_arg( array_filter( $args, function ( $v ) { return $v !== '' && $v !== null; } ), $basis );
+}
+
+/**
+ * Leisteen kop bovenaan elk scherm, zoals de websiteheader.
+ * $k: boven, titel, sub, terug_url, terug_label, rechts (html), avatar, na (html onder de titel).
+ */
+function arrahma_docenten_kop( array $k ): void {
+    echo '<header class="arr-kop"><div class="arr-kop-rij">';
+    if ( ! empty( $k['terug_url'] ) ) {
+        echo '<a class="arr-terug" href="' . esc_url( $k['terug_url'] ) . '">' . arrahma_icoon( 'links', 16 ) . esc_html( $k['terug_label'] ?? 'Terug' ) . '</a>';
+    } else {
+        echo '<span class="arr-boven">' . esc_html( $k['boven'] ?? '' ) . '</span>';
+    }
+    echo ! empty( $k['terug_url'] ) ? '<span class="arr-boven">' . esc_html( $k['boven'] ?? '' ) . '</span>' : ( $k['rechts'] ?? '' );
+    echo '</div>';
+
+    echo '<div class="arr-kop-titel">';
+    if ( ! empty( $k['avatar'] ) ) {
+        echo '<span class="arr-av arr-av-groot" aria-hidden="true">' . esc_html( $k['avatar'] ) . '</span>';
+    }
+    echo '<div><h2>' . esc_html( $k['titel'] ?? '' ) . '</h2>';
+    if ( ! empty( $k['sub'] ) ) echo '<p class="arr-kop-sub">' . esc_html( $k['sub'] ) . '</p>';
+    echo '</div></div>';
+    if ( ! empty( $k['na'] ) ) echo '<div class="arr-kop-na">' . $k['na'] . '</div>';
+    echo '</header>';
+    // Alles onder de kop komt in één gecentreerde kolom (breedte per scherm, zie CSS --breedte).
+    if ( empty( $GLOBALS['arrahma_hoofd_open'] ) ) {
+        echo '<div class="arr-hoofd">';
+        $GLOBALS['arrahma_hoofd_open'] = true;
+    }
+}
+
+/** Lijst / Kalender-schakelaar voor een eenheid. */
+function arrahma_docenten_wissel( string $basis, string $sleutel, string $actief, string $datum ): string {
+    $lijst    = arrahma_docenten_link( $basis, [ 'eenheid' => $sleutel, 'datum' => $datum ] );
+    $kalender = arrahma_docenten_link( $basis, [ 'eenheid' => $sleutel, 'weergave' => 'kalender', 'maand' => substr( $datum, 0, 7 ) ] );
+    return '<nav class="arr-wissel" aria-label="Weergave">'
+        . '<a href="' . esc_url( $lijst ) . '"' . ( $actief === 'lijst' ? ' aria-current="page"' : '' ) . '>' . arrahma_icoon( 'lijst', 16 ) . 'Lijst</a>'
+        . '<a href="' . esc_url( $kalender ) . '"' . ( $actief === 'kalender' ? ' aria-current="page"' : '' ) . '>' . arrahma_icoon( 'kal', 16 ) . 'Kalender</a></nav>';
+}
+
+/** Lege toestand: zegt waarom er niets staat en wat de volgende stap is. */
+function arrahma_docenten_leeg( string $icoon, string $titel, string $tekst, string $knop_url = '', string $knop_label = '' ): void {
+    echo '<div class="arr-leeg"><span class="arr-leeg-icoon' . ( $icoon === 'klok' ? ' is-leisteen' : '' ) . '">' . arrahma_icoon( $icoon, 34 ) . '</span>'
+        . '<h3>' . esc_html( $titel ) . '</h3><p>' . esc_html( $tekst ) . '</p>'
+        . ( $knop_url ? '<a class="arr-knop arr-knop-rand" href="' . esc_url( $knop_url ) . '">' . esc_html( $knop_label ) . '</a>' : '' )
+        . '</div>';
+}
+
+function arrahma_docenten_melding(): void {
+    $meldingen = [
+        'toegevoegd'   => [ true,  'Notitie opgeslagen.' ],
+        'gewijzigd'    => [ true,  'Notitie aangepast.' ],
+        'verwijderd'   => [ true,  'Notitie verwijderd.' ],
+        'leeg'         => [ false, 'Een notitie kan niet leeg zijn.' ],
+        'verlopen'     => [ false, 'De pagina was verlopen. Probeer het opnieuw.' ],
+        'geen_toegang' => [ false, 'Je hebt hier geen toegang toe.' ],
+        'mislukt'      => [ false, 'Opslaan is mislukt. Probeer het opnieuw.' ],
+    ];
+    $code = sanitize_key( wp_unslash( $_GET['melding'] ?? '' ) );
+    if ( ! isset( $meldingen[ $code ] ) ) return;
+    [ $ok, $tekst ] = $meldingen[ $code ];
+    echo '<div class="arr-melding' . ( $ok ? ' is-ok' : '' ) . '" role="status">' . esc_html( $tekst ) . '</div>';
+}
+
+// ── Voltooiing: hoe ver is de presentie van een les? ─────────
+
+/** [ slot => [ datum => [ inschrijving_id => status ] ] ] voor een periode, optioneel alleen bepaalde blokken. */
+function arrahma_aanwezigheid_kaart( string $van, string $tot, array $slots = [] ): array {
+    global $wpdb;
+    $table = $wpdb->prefix . ARRAHMA_AANWEZIG_TABLE;
+    $sql   = "SELECT rooster, lesdatum, inschrijving_id, status FROM {$table} WHERE lesdatum BETWEEN %s AND %s";
+    $args  = [ $van, $tot ];
+    if ( $slots ) {
+        $sql .= ' AND rooster IN (' . implode( ',', array_fill( 0, count( $slots ), '%s' ) ) . ')';
+        $args = array_merge( $args, array_values( $slots ) );
+    }
+    $kaart = [];
+    foreach ( $wpdb->get_results( $wpdb->prepare( $sql, $args ) ) as $r ) {
+        $kaart[ $r->rooster ][ $r->lesdatum ][ (int) $r->inschrijving_id ] = $r->status;
+    }
+    return $kaart;
+}
+
+/** Ids van de leerlingen die bij een eenheid op de lijst staan (inclusief "nog niet in een klas"). */
+function arrahma_eenheid_ids( array $eenheid ): array {
+    $ids = [];
+    foreach ( arrahma_eenheid_secties( $eenheid ) as $sectie ) {
+        foreach ( $sectie['rijen'] as $rij ) $ids[] = (int) $rij->id;
+    }
+    return $ids;
+}
+
+/** Staat van één les: geen (geen leerlingen) | leeg | deels | klaar, met tellingen. */
+function arrahma_voltooiing( array $ids, array $gezet ): array {
+    $ingevuld = 0;
+    $afwezig  = 0;
+    $per      = [];
+    foreach ( $ids as $id ) {
+        if ( ! isset( $gezet[ $id ] ) ) continue;
+        $ingevuld++;
+        $per[ $gezet[ $id ] ] = ( $per[ $gezet[ $id ] ] ?? 0 ) + 1;
+        if ( $gezet[ $id ] === 'afwezig' ) $afwezig++;
+    }
+    $totaal = count( $ids );
+    $staat  = ! $totaal ? 'geen' : ( ! $ingevuld ? 'leeg' : ( $ingevuld < $totaal ? 'deels' : 'klaar' ) );
+    return [ 'staat' => $staat, 'ingevuld' => $ingevuld, 'totaal' => $totaal, 'afwezig' => $afwezig, 'per' => $per ];
+}
+
+/** Wat een dag is voor een blok: les | vervalt | vakantie | geen, met extra-les en vakantienaam. */
+function arrahma_dag_soort( string $slot, string $datum ): array {
+    $info = arrahma_lesdag_info( $slot, $datum );
+    $extra = $info['les'] && $info['reden'] === 'Extra les';
+    $vakantie = '';
+    foreach ( arrahma_vakanties() as $v ) {
+        if ( $datum >= $v['van'] && $datum <= $v['tot'] && arrahma_vakantie_geldt( $v, $slot ) ) { $vakantie = $v['naam']; break; }
+    }
+    if ( $info['les'] ) return [ 'soort' => 'les', 'extra' => $extra, 'vakantie' => $vakantie ];
+    if ( $info['reden'] === 'Deze les vervalt.' ) return [ 'soort' => 'vervalt', 'extra' => false, 'vakantie' => $vakantie ];
+    $weekdag = (int) ( new DateTimeImmutable( $datum ) )->format( 'N' );
+    $lesdag  = in_array( $weekdag, arrahma_slot_weekdagen( $slot ), true );
+    return [ 'soort' => $vakantie !== '' && $lesdag ? 'vakantie' : 'geen', 'extra' => false, 'vakantie' => $vakantie ];
+}
+
+/** Verstreken lessen (tot en met gisteren) die niet compleet zijn ingevuld, nieuwste eerst. */
+function arrahma_open_lessen( array $eenheden ): array {
+    $tot = arrahma_verschuif_datum( arrahma_vandaag(), -1 );
+    $van = arrahma_verschuif_datum( arrahma_vandaag(), -ARRAHMA_OPEN_DAGEN );
+    $slots = array_values( array_unique( array_map( function ( $e ) { return $e['slot']; }, $eenheden ) ) );
+    if ( ! $slots ) return [];
+    $kaart = arrahma_aanwezigheid_kaart( $van, $tot, $slots );
+
+    $open = [];
+    foreach ( $eenheden as $sleutel => $eenheid ) {
+        $ids = arrahma_eenheid_ids( $eenheid );
+        if ( ! $ids ) continue;
+        foreach ( arrahma_lesdata_in_periode( $eenheid['slot'], $van, $tot ) as $datum ) {
+            $v = arrahma_voltooiing( $ids, $kaart[ $eenheid['slot'] ][ $datum ] ?? [] );
+            if ( $v['staat'] === 'leeg' || $v['staat'] === 'deels' ) {
+                $open[] = [ 'sleutel' => $sleutel, 'eenheid' => $eenheid, 'datum' => $datum, 'v' => $v ];
+            }
+        }
+    }
+    usort( $open, function ( $a, $b ) { return strcmp( $b['datum'], $a['datum'] ); } );
+    return $open;
+}
+
+/** Glyph voor de staat van een les in kalender en maandoverzicht. */
+function arrahma_glyph( string $staat ): string {
+    $naam = [ 'klaar' => 'klaar', 'deels' => 'deels', 'leeg' => 'leeg', 'geen' => 'leeg', 'toekomst' => 'toekomst', 'vervalt' => 'vervalt' ][ $staat ] ?? 'leeg';
+    return '<svg class="arr-glyph" width="20" height="20" aria-hidden="true" focusable="false"><use href="#arr-g-' . $naam . '"/></svg>';
+}
+
+function arrahma_staat_label( array $v ): string {
+    switch ( $v['staat'] ) {
+        case 'klaar': return 'compleet';
+        case 'deels': return $v['ingevuld'] . ' van ' . $v['totaal'] . ' ingevuld';
+        case 'geen':  return 'geen leerlingen';
+        default:      return 'niet ingevuld';
+    }
+}
+
+// ── Scherm: inloggen ─────────────────────────────────────────
+
+function arrahma_logo_url(): string {
+    $uploads = wp_upload_dir();
+    $pad     = trailingslashit( $uploads['basedir'] ) . ARRAHMA_LOGO_PAD;
+    $url     = file_exists( $pad ) ? trailingslashit( $uploads['baseurl'] ) . ARRAHMA_LOGO_PAD : '';
+    return (string) apply_filters( 'arrahma_docenten_logo_url', $url );
+}
+
+function arrahma_docenten_login( string $basis ): void {
+    $logo = arrahma_logo_url();
+    echo '<div class="arr-login"><div class="arr-login-kolom"><div class="arr-login-top">';
+    echo $logo !== ''
+        ? '<img src="' . esc_url( $logo ) . '" width="150" height="107" alt="Arrahma Almere Poort">'
+        : '<strong class="arr-woordmerk">ARRAHMA</strong>';
+    echo '<div><div class="arr-boven">Docenten</div><p>Log in om de aanwezigheid van je klas bij te houden.</p></div></div>';
+    echo '<div class="arr-login-kaart">';
+    wp_login_form( [
+        'redirect'       => $basis,
+        'label_username' => 'E-mailadres of gebruikersnaam',
+        'label_password' => 'Wachtwoord',
+        'label_remember' => 'Ingelogd blijven op deze telefoon',
+        'label_log_in'   => 'Inloggen',
+        'remember'       => true,
+        'value_remember' => false,
+    ] );
+    echo '<a class="arr-linkje" href="' . esc_url( wp_lostpassword_url( $basis ) ) . '">Wachtwoord vergeten of nog geen wachtwoord?</a></div></div></div>';
+}
+
+// ── Scherm: mijn groepen ─────────────────────────────────────
+
+function arrahma_docenten_overzicht( string $basis, array $eenheden ): void {
+    $user     = wp_get_current_user();
+    $voornaam = $user->first_name !== '' ? $user->first_name : $user->display_name;
+    $bestuur  = arrahma_is_bestuur();
+    $na       = $bestuur
+        ? '<a class="arr-knop arr-knop-licht-op-donker" href="' . esc_url( arrahma_docenten_link( $basis, [ 'bestuur' => 1 ] ) ) . '">' . arrahma_icoon( 'kal', 18 ) . 'Maandoverzicht alle groepen</a>'
+        : '';
+    arrahma_docenten_kop( [
+        'boven'  => 'Assalamu alaykum, ' . $voornaam,
+        'rechts' => '<a class="arr-terug" href="' . esc_url( wp_logout_url( $basis ) ) . '">Uitloggen</a>',
+        'titel'  => 'Mijn groepen',
+        'sub'    => $bestuur ? 'Je bent ingelogd als beheerder en ziet alle groepen.' : '',
+        'na'     => $na,
+    ] );
+    arrahma_docenten_melding();
+
+    if ( ! $eenheden ) {
+        arrahma_docenten_leeg( 'link', 'Nog niet gekoppeld', 'Je account is klaar, maar het bestuur heeft je nog niet aan een klas gekoppeld.' );
+        return;
+    }
+
+    $vandaag = arrahma_vandaag();
+    $kaart   = arrahma_aanwezigheid_kaart( $vandaag, $vandaag );
+    $lessen_vandaag = [];
+    $overig = [];
+    foreach ( $eenheden as $sleutel => $eenheid ) {
+        $ids = arrahma_eenheid_ids( $eenheid );
+        if ( ! $ids && $bestuur ) continue; // bestuur: lege groepen overslaan
+        $item = [ 'sleutel' => $sleutel, 'eenheid' => $eenheid, 'ids' => $ids ];
+        if ( arrahma_is_lesdag( $eenheid['slot'], $vandaag ) ) {
+            $lessen_vandaag[] = $item;
+        } else {
+            $overig[] = $item;
+        }
+    }
+
+    echo '<div class="arr-inhoud">';
+    foreach ( $lessen_vandaag as $item ) {
+        $w  = arrahma_eenheid_weergave( $item['eenheid'] );
+        $t  = arrahma_slot_tijden( $item['eenheid']['slot'] );
+        $v  = arrahma_voltooiing( $item['ids'], $kaart[ $item['eenheid']['slot'] ][ $vandaag ] ?? [] );
+        $url = arrahma_docenten_link( $basis, [ 'eenheid' => $item['sleutel'], 'datum' => $vandaag ] );
+        $knop = $v['staat'] === 'klaar' ? 'Bekijken · compleet' : ( $v['staat'] === 'deels' ? 'Verder · ' . $v['ingevuld'] . ' van ' . $v['totaal'] : 'Presentie opnemen' );
+        echo '<article class="arr-vandaag"><div class="arr-vandaag-kop"><div><span class="arr-pill">Vandaag</span>'
+            . '<h3>' . esc_html( $w['titel'] ) . '</h3><p class="arr-meta">' . esc_html( $w['boven'] . ' · ' . arrahma_slot_dag_tijd( $item['eenheid']['slot'] )['dag'] ) . '</p></div>'
+            . '<div class="arr-tijd">' . esc_html( $t['start'] ) . ( $t['eind'] !== '' ? '<small>tot ' . esc_html( $t['eind'] ) . '</small>' : '' ) . '</div></div>'
+            . '<div class="arr-telling">';
+        if ( ! empty( $v['per']['afgemeld'] ) ) {
+            echo '<span class="arr-chip c-afgemeld">' . arrahma_icoon( 'afgemeld', 13 ) . (int) $v['per']['afgemeld'] . ' afgemeld</span>';
+        }
+        echo '<span class="arr-chip c-neutraal">' . count( $item['ids'] ) . ' leerlingen</span></div>'
+            . '<a class="arr-knop ' . ( $v['staat'] === 'klaar' ? 'arr-knop-rand' : 'arr-knop-goud' ) . ' arr-knop-breed" href="' . esc_url( $url ) . '">' . esc_html( $knop ) . '</a></article>';
+    }
+
+    $open = arrahma_open_lessen( $eenheden );
+    if ( $open ) {
+        echo '<p class="arr-lijstkop">Nog in te vullen</p>';
+        foreach ( array_slice( $open, 0, ARRAHMA_OPEN_MAX ) as $o ) {
+            $w   = arrahma_eenheid_weergave( $o['eenheid'] );
+            $url = arrahma_docenten_link( $basis, [ 'eenheid' => $o['sleutel'], 'datum' => $o['datum'] ] );
+            $wat = $o['v']['staat'] === 'deels' ? ( $o['v']['totaal'] - $o['v']['ingevuld'] ) . ' van ' . $o['v']['totaal'] . ' nog open' : 'Presentie nog niet ingevuld';
+            echo '<a class="arr-groep is-open" href="' . esc_url( $url ) . '"><span class="arr-blok">' . esc_html( arrahma_weekdag_kort( $o['datum'] ) ) . '</span>'
+                . '<span class="arr-groep-tekst"><b>' . esc_html( $w['titel'] . ' · ' . date_i18n( 'l j M', strtotime( $o['datum'] . ' 12:00:00' ) ) ) . '</b>'
+                . '<span>' . esc_html( ( $bestuur ? $w['boven'] . ' · ' : '' ) . $wat ) . '</span></span><span class="arr-aantal">Invullen</span></a>';
+        }
+        if ( count( $open ) > ARRAHMA_OPEN_MAX && $bestuur ) {
+            echo '<a class="arr-linkje" href="' . esc_url( arrahma_docenten_link( $basis, [ 'bestuur' => 1 ] ) ) . '">Nog ' . ( count( $open ) - ARRAHMA_OPEN_MAX ) . ' open lessen — bekijk het maandoverzicht</a>';
+        }
+    }
+
+    if ( $overig ) {
+        echo '<p class="arr-lijstkop">' . ( $lessen_vandaag ? 'Andere groepen' : ( $bestuur ? 'Alle groepen' : 'Mijn groepen' ) ) . '</p>';
+        foreach ( $overig as $item ) {
+            $w        = arrahma_eenheid_weergave( $item['eenheid'] );
+            $volgende = arrahma_zoek_les( $item['eenheid']['slot'], $vandaag, 1 );
+            $t        = arrahma_slot_tijden( $item['eenheid']['slot'] );
+            $url      = arrahma_docenten_link( $basis, [ 'eenheid' => $item['sleutel'] ] );
+            echo '<a class="arr-groep" href="' . esc_url( $url ) . '"><span class="arr-blok">' . esc_html( $volgende ? arrahma_weekdag_kort( $volgende ) : '–' ) . '</span>'
+                . '<span class="arr-groep-tekst"><b>' . esc_html( $w['boven'] . ' · ' . $w['titel'] ) . '</b>'
+                . '<span>' . esc_html( $volgende ? 'Volgende les: ' . date_i18n( 'D j M', strtotime( $volgende . ' 12:00:00' ) ) . ', ' . $t['start'] : 'Geen les gepland' ) . '</span></span>'
+                . '<span class="arr-aantal" title="Leerlingen">' . count( $item['ids'] ) . '</span></a>';
+        }
+    }
+    echo '</div>';
+}
+
+// ── Scherm: presentielijst ───────────────────────────────────
+
+function arrahma_docenten_presentie( string $basis, string $sleutel ): void {
+    $eenheid = arrahma_mag_eenheid( $sleutel );
+    if ( ! $eenheid ) {
+        arrahma_docenten_kop( [ 'boven' => 'Docenten', 'titel' => 'Groep niet gevonden', 'terug_url' => $basis, 'terug_label' => 'Groepen' ] );
+        arrahma_docenten_leeg( 'link', 'Geen toegang tot deze groep', 'Deze groep bestaat niet of je bent er niet aan gekoppeld.', $basis, 'Naar mijn groepen' );
+        return;
+    }
+
+    $slot    = $eenheid['slot'];
+    $vandaag = arrahma_vandaag();
+    $datum   = sanitize_text_field( wp_unslash( $_GET['datum'] ?? '' ) );
+    if ( ! arrahma_geldige_datum( $datum ) ) $datum = arrahma_standaard_lesdatum( $slot );
+
+    $w        = arrahma_eenheid_weergave( $eenheid );
+    $info     = arrahma_lesdag_info( $slot, $datum );
+    $vorige   = arrahma_zoek_les( $slot, $datum, -1 );
+    $volgende = arrahma_zoek_les( $slot, $datum, 1 );
+    $link     = function ( string $d ) use ( $basis, $sleutel ) { return arrahma_docenten_link( $basis, [ 'eenheid' => $sleutel, 'datum' => $d ] ); };
+
+    $nav = '<div class="arr-datumnav">'
+        . ( $vorige ? '<a class="arr-rond" href="' . esc_url( $link( $vorige ) ) . '" aria-label="Vorige les: ' . esc_attr( arrahma_datum_lang( $vorige ) ) . '">' . arrahma_icoon( 'links', 20 ) . '</a>' : '<span class="arr-rond is-uit" aria-hidden="true">' . arrahma_icoon( 'links', 20 ) . '</span>' )
+        . '<div class="arr-datum"><strong>' . esc_html( arrahma_datum_titel( $datum ) ) . '</strong><small>' . esc_html( substr( $datum, 0, 4 ) )
+        . ( $datum === $vandaag ? ' <span class="arr-pill">Vandaag</span>' : '' ) . '</small></div>'
+        . ( $volgende && $volgende <= $vandaag ? '<a class="arr-rond" href="' . esc_url( $link( $volgende ) ) . '" aria-label="Volgende les: ' . esc_attr( arrahma_datum_lang( $volgende ) ) . '">' . arrahma_icoon( 'rechts', 20 ) . '</a>' : '<span class="arr-rond is-uit" aria-hidden="true">' . arrahma_icoon( 'rechts', 20 ) . '</span>' )
+        . '</div>';
+
+    arrahma_docenten_kop( [
+        'boven'       => $w['boven'],
+        'titel'       => $w['titel'],
+        'sub'         => $w['sub'],
+        'terug_url'   => $basis,
+        'terug_label' => 'Groepen',
+        'na'          => arrahma_docenten_wissel( $basis, $sleutel, 'lijst', $datum ) . $nav,
+    ] );
+
+    if ( ! $info['les'] ) {
+        $soort = arrahma_dag_soort( $slot, $datum );
+        $naar  = $volgende ?: $vorige;
+        arrahma_docenten_leeg(
+            $soort['soort'] === 'vakantie' ? 'zon' : 'klok',
+            $soort['soort'] === 'vakantie' ? $soort['vakantie'] : ( $soort['soort'] === 'vervalt' ? 'Deze les vervalt' : 'Geen les op deze dag' ),
+            $info['reden'] . ( $naar ? ' De ' . ( $naar === $volgende ? 'volgende' : 'vorige' ) . ' les is ' . arrahma_datum_lang( $naar ) . '.' : '' ),
+            $naar ? $link( $naar ) : '', $naar ? 'Naar ' . date_i18n( 'j F', strtotime( $naar . ' 12:00:00' ) ) : ''
+        );
+        return;
+    }
+    if ( $datum > $vandaag ) {
+        arrahma_docenten_leeg( 'klok', 'Nog niet begonnen', arrahma_datum_titel( $datum ) . ' is nog niet geweest. Presentie opnemen kan vanaf de dag zelf.',
+            $link( arrahma_standaard_lesdatum( $slot ) ), 'Naar de laatste les' );
+        return;
+    }
+
+    $secties = arrahma_eenheid_secties( $eenheid );
+    if ( ! arrahma_aantal_in_secties( $secties ) ) {
+        arrahma_docenten_leeg( 'link', 'Nog geen leerlingen', 'Er zitten nog geen leerlingen in deze groep. Het bestuur deelt ze in.' );
+        return;
+    }
+
+    arrahma_docenten_melding();
+    $gezet     = arrahma_aanwezigheid_op( $slot, $datum );
+    $statussen = arrahma_aanwezig_statussen();
+
+    echo '<div class="arr-voortgang"><div class="arr-voortgang-rij"><span id="arr-teller"></span><span id="arr-open" class="arr-muted"></span></div>'
+        . '<div class="arr-balk"><i id="arr-balk"></i></div><div class="arr-telling" id="arr-telling"></div></div>';
+    echo '<div class="arr-st-legenda" aria-hidden="true"><span>Leerling</span><span>Aanw.</span><span>Laat</span><span>Afgem.</span><span>Afw.</span></div>';
+    echo '<div id="arr-presentie" class="arr-presentie" data-ajax="' . esc_url( admin_url( 'admin-ajax.php' ) ) . '" data-nonce="'
+        . esc_attr( wp_create_nonce( 'arrahma_aanwezigheid' ) ) . '" data-datum="' . esc_attr( $datum ) . '">';
+
+    foreach ( $secties as $sectie ) {
+        if ( $sectie['titel'] !== '' ) echo '<h3 class="arr-sectie">' . esc_html( $sectie['titel'] ) . '</h3>';
+        if ( ! $sectie['rijen'] ) echo '<p class="arr-sub arr-rij-leeg">Nog geen leerlingen in deze klas.</p>';
+        foreach ( $sectie['rijen'] as $rij ) {
+            $naam   = trim( $rij->voornaam . ' ' . $rij->achternaam );
+            $huidig = $gezet[ (int) $rij->id ] ?? '';
+            $detail = arrahma_docenten_link( $basis, [ 'leerling' => (int) $rij->id, 'eenheid' => $sleutel ] );
+            echo '<div class="arr-rij" data-id="' . (int) $rij->id . '" data-status="' . esc_attr( $huidig ) . '">'
+                . '<span class="arr-av" aria-hidden="true">' . esc_html( arrahma_initialen( $naam ) ) . '</span>'
+                . '<div class="arr-naam"><a href="' . esc_url( $detail ) . '">' . esc_html( $naam ) . '</a><small></small></div>'
+                . '<div class="arr-st" role="group" aria-label="Aanwezigheid ' . esc_attr( $naam ) . '">';
+            foreach ( $statussen as $waarde => $label ) {
+                echo '<button type="button" data-s="' . esc_attr( $waarde ) . '" aria-label="' . esc_attr( $label ) . '" aria-pressed="'
+                    . ( $huidig === $waarde ? 'true' : 'false' ) . '">' . arrahma_icoon( $waarde, 18 ) . '<span class="arr-st-tekst">' . esc_html( $label ) . '</span></button>';
+            }
+            echo '</div></div>';
+        }
+    }
+    echo '</div>';
+    echo '<div class="arr-actiebalk"><span class="arr-opgeslagen" id="arr-opgeslagen" aria-live="polite">' . arrahma_icoon( 'wolk', 16 ) . '<span>Alles opgeslagen</span></span>'
+        . '<button type="button" class="arr-knop arr-knop-leisteen" id="arr-rest">Rest op aanwezig</button></div>';
+    arrahma_docenten_presentie_js();
+}
+
+function arrahma_docenten_presentie_js(): void {
+    $labels = wp_json_encode( arrahma_aanwezig_statussen() );
+    ?>
+    <script>
+    (function () {
+      var root = document.getElementById('arr-presentie');
+      if (!root) return;
+      var LABEL = <?= $labels ?>, ORDE = Object.keys(LABEL);
+      var url = root.getAttribute('data-ajax'), nonce = root.getAttribute('data-nonce'), datum = root.getAttribute('data-datum');
+      var rijen = Array.prototype.slice.call(root.querySelectorAll('.arr-rij'));
+      var bezig = 0, mislukt = 0;
+
+      function icoon(s) { return '<svg class="arr-i" width="13" height="13" aria-hidden="true"><use href="#arr-i-' + s + '"/></svg>'; }
+      function label(rij, fout) {
+        var s = rij.getAttribute('data-status'), sm = rij.querySelector('small');
+        sm.className = fout ? 'is-fout' : (s ? 't-' + s : 'is-leeg');
+        sm.textContent = fout || (s ? LABEL[s] : 'Nog niet ingevuld');
+      }
+      function tel() {
+        var n = 0, per = {};
+        rijen.forEach(function (r) { var s = r.getAttribute('data-status'); if (s) { n++; per[s] = (per[s] || 0) + 1; } });
+        document.getElementById('arr-teller').innerHTML = '<b>' + n + '</b> van <b>' + rijen.length + '</b> ingevuld';
+        document.getElementById('arr-open').textContent = rijen.length - n ? (rijen.length - n) + ' open' : 'compleet';
+        document.getElementById('arr-balk').style.width = Math.round(n / Math.max(rijen.length, 1) * 100) + '%';
+        document.getElementById('arr-telling').innerHTML = ORDE.filter(function (s) { return per[s]; }).map(function (s) {
+          return '<span class="arr-chip c-' + s + '">' + icoon(s) + per[s] + ' ' + LABEL[s].toLowerCase() + '</span>';
+        }).join('');
+      }
+      function melding() {
+        var el = document.getElementById('arr-opgeslagen'), tekst = el.querySelector('span');
+        el.className = 'arr-opgeslagen' + (mislukt ? ' is-fout' : '');
+        tekst.textContent = bezig ? 'Opslaan…' : (mislukt ? 'Niet alles opgeslagen' : 'Alles opgeslagen');
+      }
+      function toon(rij, status) {
+        rij.setAttribute('data-status', status);
+        Array.prototype.forEach.call(rij.querySelectorAll('.arr-st button'), function (b) {
+          b.setAttribute('aria-pressed', b.getAttribute('data-s') === status ? 'true' : 'false');
+        });
+        label(rij, ''); tel();
+      }
+      function fout(bericht) { var e = new Error(bericht); e.eigen = true; return e; }
+
+      function opslaan(rij, status) {
+        var vorige = rij.getAttribute('data-status') || '';
+        if (rij.classList.contains('is-fout')) { rij.classList.remove('is-fout'); mislukt = Math.max(0, mislukt - 1); }
+        toon(rij, status);
+        rij.classList.add('is-bezig'); bezig++; melding();
+
+        var fd = new FormData();
+        fd.append('action', 'arrahma_aanwezigheid');
+        fd.append('nonce', nonce);
+        fd.append('inschrijving_id', rij.getAttribute('data-id'));
+        fd.append('datum', datum);
+        fd.append('status', status);
+
+        return fetch(url, { method: 'POST', body: fd, credentials: 'same-origin' })
+          .then(function (r) {
+            return r.json().catch(function () {
+              throw fout(r.status === 400 || r.status === 403
+                ? 'Je sessie is verlopen. Herlaad de pagina.'
+                : 'Opslaan mislukt. Tik opnieuw.');
+            });
+          })
+          .then(function (res) {
+            if (!res || !res.success) throw fout(res && res.data && res.data.bericht ? res.data.bericht : 'Opslaan mislukt. Tik opnieuw.');
+          })
+          .catch(function (e) {
+            toon(rij, vorige);
+            rij.classList.add('is-fout'); mislukt++;
+            label(rij, e && e.eigen ? e.message : 'Geen verbinding — niet opgeslagen. Tik opnieuw.');
+          })
+          .then(function () { rij.classList.remove('is-bezig'); bezig--; melding(); });
+      }
+
+      root.addEventListener('click', function (ev) {
+        var knop = ev.target.closest('.arr-st button');
+        if (!knop || !root.contains(knop)) return;
+        var rij = knop.closest('.arr-rij');
+        if (rij.classList.contains('is-bezig')) return;
+        // Nog eens tikken op de gekozen status wist hem weer.
+        opslaan(rij, knop.getAttribute('aria-pressed') === 'true' ? '' : knop.getAttribute('data-s'));
+      });
+
+      var rest = document.getElementById('arr-rest');
+      if (rest) rest.addEventListener('click', function () {
+        var open = rijen.filter(function (r) { return !r.getAttribute('data-status'); });
+        if (!open.length) return;
+        rest.disabled = true;
+        open.reduce(function (p, r) { return p.then(function () { return opslaan(r, 'aanwezig'); }); }, Promise.resolve())
+          .then(function () { rest.disabled = false; });
+      });
+
+      rijen.forEach(function (r) { label(r, ''); });
+      tel(); melding();
+    })();
+    </script>
+    <?php
+}
+
+// ── Scherm: kalender per groep ───────────────────────────────
+
+/** Maand uit de URL (JJJJ-MM) of de maand van de standaardles. */
+function arrahma_maand_uit_request( string $standaard ): string {
+    $maand = sanitize_text_field( wp_unslash( $_GET['maand'] ?? '' ) );
+    return preg_match( '/^\d{4}-(0[1-9]|1[0-2])$/', $maand ) ? $maand : substr( $standaard, 0, 7 );
+}
+
+function arrahma_maand_verschuif( string $maand, int $stap ): string {
+    return ( new DateTimeImmutable( $maand . '-01' ) )->modify( sprintf( '%+d month', $stap ) )->format( 'Y-m' );
+}
+
+function arrahma_maand_naam( string $maand ): string {
+    return ucfirst( date_i18n( 'F Y', strtotime( $maand . '-15 12:00:00' ) ) );
+}
+
+/** Vakanties die in een maand vallen en voor dit blok gelden. */
+function arrahma_vakanties_in_maand( string $maand, string $slot ): array {
+    $van = $maand . '-01';
+    $tot = ( new DateTimeImmutable( $van ) )->format( 'Y-m-t' );
+    return array_values( array_filter( arrahma_vakanties(), function ( $v ) use ( $van, $tot, $slot ) {
+        return $v['van'] <= $tot && $v['tot'] >= $van && arrahma_vakantie_geldt( $v, $slot );
+    } ) );
+}
+
+function arrahma_docenten_kalender( string $basis, string $sleutel ): void {
+    $eenheid = arrahma_mag_eenheid( $sleutel );
+    if ( ! $eenheid ) {
+        arrahma_docenten_presentie( $basis, $sleutel ); // toont de nette "geen toegang"-toestand
+        return;
+    }
+    $slot      = $eenheid['slot'];
+    $vandaag   = arrahma_vandaag();
+    $standaard = arrahma_standaard_lesdatum( $slot );
+    $maand     = arrahma_maand_uit_request( $standaard );
+    $eerste    = $maand . '-01';
+    $laatste   = ( new DateTimeImmutable( $eerste ) )->format( 'Y-m-t' );
+    $w         = arrahma_eenheid_weergave( $eenheid );
+
+    arrahma_docenten_kop( [
+        'boven'       => $w['boven'],
+        'titel'       => $w['titel'],
+        'sub'         => $w['sub'],
+        'terug_url'   => $basis,
+        'terug_label' => 'Groepen',
+        'na'          => arrahma_docenten_wissel( $basis, $sleutel, 'kalender', $standaard ),
+    ] );
+
+    $ids   = arrahma_eenheid_ids( $eenheid );
+    $kaart = arrahma_aanwezigheid_kaart( $eerste, $laatste, [ $slot ] )[ $slot ] ?? [];
+    $maandlink = function ( string $m ) use ( $basis, $sleutel ) {
+        return arrahma_docenten_link( $basis, [ 'eenheid' => $sleutel, 'weergave' => 'kalender', 'maand' => $m ] );
+    };
+
+    echo '<div class="arr-kal-layout"><section class="arr-maand" aria-label="' . esc_attr( arrahma_maand_naam( $maand ) ) . '"><div class="arr-maand-kop">'
+        . '<a class="arr-klein" href="' . esc_url( $maandlink( arrahma_maand_verschuif( $maand, -1 ) ) ) . '" aria-label="Vorige maand">' . arrahma_icoon( 'links', 18 ) . '</a>'
+        . '<strong>' . esc_html( arrahma_maand_naam( $maand ) ) . '</strong>'
+        . '<a class="arr-klein" href="' . esc_url( $maandlink( arrahma_maand_verschuif( $maand, 1 ) ) ) . '" aria-label="Volgende maand">' . arrahma_icoon( 'rechts', 18 ) . '</a></div>';
+
+    echo '<div class="arr-raster">';
+    foreach ( [ 'Ma', 'Di', 'Wo', 'Do', 'Vr', 'Za', 'Zo' ] as $wd ) echo '<div class="arr-wd">' . $wd . '</div>';
+    $leeg = (int) ( new DateTimeImmutable( $eerste ) )->format( 'N' ) - 1;
+    echo str_repeat( '<div></div>', $leeg );
+
+    for ( $datum = $eerste; $datum <= $laatste; $datum = arrahma_verschuif_datum( $datum, 1 ) ) {
+        $dag   = (int) substr( $datum, 8, 2 );
+        $soort = arrahma_dag_soort( $slot, $datum );
+        $cls   = 'arr-dag' . ( $datum === $vandaag ? ' is-vandaag' : '' ) . ( $soort['vakantie'] !== '' ? ' is-vak' : '' );
+        $num   = '<span class="arr-num">' . $dag . '</span>';
+
+        if ( $soort['soort'] === 'les' && $datum > $vandaag ) {
+            echo '<div class="' . $cls . ' is-toekomst' . ( $soort['extra'] ? ' is-extra' : '' ) . '" title="Nog niet geweest">' . $num . arrahma_glyph( 'toekomst' ) . '</div>';
+        } elseif ( $soort['soort'] === 'les' ) {
+            $v    = arrahma_voltooiing( $ids, $kaart[ $datum ] ?? [] );
+            $mini = ( $v['afwezig'] ? '<span class="arr-mini is-rood">' . (int) $v['afwezig'] . ' afw</span>' : '' )
+                  . ( $v['totaal'] ? '<span class="arr-dag-teller">' . (int) $v['ingevuld'] . '/' . (int) $v['totaal'] . '</span>' : '' );
+            $url  = arrahma_docenten_link( $basis, [ 'eenheid' => $sleutel, 'datum' => $datum ] );
+            echo '<a class="' . $cls . ' is-les' . ( $soort['extra'] ? ' is-extra' : '' ) . '" href="' . esc_url( $url ) . '" aria-label="'
+                . esc_attr( arrahma_datum_lang( $datum ) . ': ' . arrahma_staat_label( $v ) ) . '">' . $num . arrahma_glyph( $v['staat'] ) . $mini . '</a>';
+        } elseif ( $soort['soort'] === 'vervalt' ) {
+            echo '<div class="' . $cls . ' is-vervalt" title="Les vervalt">' . $num . arrahma_glyph( 'vervalt' ) . '<span class="arr-mini">vervalt</span></div>';
+        } elseif ( $soort['soort'] === 'vakantie' ) {
+            echo '<div class="' . $cls . '" title="' . esc_attr( $soort['vakantie'] ) . '">' . $num . '<span class="arr-mini">vakantie</span></div>';
+        } else {
+            echo '<div class="' . $cls . '">' . $num . '</div>';
+        }
+    }
+    echo '</div>';
+    foreach ( arrahma_vakanties_in_maand( $maand, $slot ) as $v ) {
+        echo '<p class="arr-vak-label">' . arrahma_icoon( 'zon', 16 ) . esc_html( $v['naam'] . ' · ' . date_i18n( 'j M', strtotime( $v['van'] . ' 12:00:00' ) )
+            . ' t/m ' . date_i18n( 'j M', strtotime( $v['tot'] . ' 12:00:00' ) ) ) . '</p>';
+    }
+    echo '</section><aside class="arr-kal-zij">';
+
+    echo '<div class="arr-klegenda">'
+        . '<span>' . arrahma_glyph( 'klaar' ) . 'Compleet</span><span>' . arrahma_glyph( 'deels' ) . 'Deels ingevuld</span>'
+        . '<span>' . arrahma_glyph( 'leeg' ) . 'Niet ingevuld</span><span>' . arrahma_glyph( 'toekomst' ) . 'Nog niet geweest</span>'
+        . '<span>' . arrahma_glyph( 'vervalt' ) . 'Les vervalt</span><span><i class="arr-vak-staal"></i>Vakantie</span></div>';
+
+    if ( arrahma_is_lesdag( $slot, $standaard ) && $standaard <= $vandaag ) {
+        $v   = arrahma_voltooiing( $ids, arrahma_aanwezigheid_op( $slot, $standaard ) );
+        $url = arrahma_docenten_link( $basis, [ 'eenheid' => $sleutel, 'datum' => $standaard ] );
+        echo '<div class="arr-volgende"><div><b>' . esc_html( arrahma_weekdag_kort( $standaard ) . ' ' . date_i18n( 'j M', strtotime( $standaard . ' 12:00:00' ) )
+            . ( $standaard === $vandaag ? ' · vandaag' : ' · laatste les' ) ) . '</b><span>' . esc_html( ucfirst( arrahma_staat_label( $v ) )
+            . ( $v['afwezig'] ? ' · ' . $v['afwezig'] . ' afwezig' : '' ) ) . '</span></div>'
+            . '<a class="arr-knop arr-knop-goud arr-knop-klein" href="' . esc_url( $url ) . '">' . ( $v['staat'] === 'klaar' ? 'Openen' : 'Verder' ) . '</a></div>';
+    }
+    echo '</aside></div>';
+}
+
+// ── Scherm: leerling ─────────────────────────────────────────
+
+function arrahma_leeftijd( ?string $geboortedatum ): string {
+    if ( ! $geboortedatum || ! arrahma_geldige_datum( $geboortedatum ) ) return '';
+    $jaren = ( new DateTimeImmutable( $geboortedatum ) )->diff( new DateTimeImmutable( arrahma_vandaag() ) )->y;
+    return $jaren . ' jaar';
+}
+
+function arrahma_telefoon_link( string $nummer ): string {
+    return 'tel:' . preg_replace( '/[^0-9+]/', '', $nummer );
+}
+
+function arrahma_docenten_leerling( string $basis, int $id, string $sleutel ): void {
+    $rij = arrahma_haal_inschrijving( $id );
+    if ( ! arrahma_mag_leerling( $rij ) ) {
+        arrahma_docenten_kop( [ 'boven' => 'Docenten', 'titel' => 'Leerling niet gevonden', 'terug_url' => $basis, 'terug_label' => 'Groepen' ] );
+        arrahma_docenten_leeg( 'link', 'Geen toegang', 'Deze leerling bestaat niet of zit niet in jouw groep.', $basis, 'Naar mijn groepen' );
+        return;
+    }
+
+    $naam      = trim( $rij->voornaam . ' ' . $rij->achternaam );
+    $slot      = (string) $rij->rooster;
+    $eenheid   = $sleutel !== '' ? arrahma_mag_eenheid( $sleutel ) : null;
+    $terug     = $eenheid ? arrahma_docenten_link( $basis, [ 'eenheid' => $sleutel ] ) : $basis;
+    $klas      = arrahma_klassen_van_slot( $slot )[ (string) ( $rij->klas ?? '' ) ] ?? '';
+    $leeftijd  = arrahma_leeftijd( $rij->geboortedatum );
+    $dt        = arrahma_slot_dag_tijd( $slot );
+    $heeft_cp  = ! empty( $rij->cp_anders ) && ( $rij->cp_voornaam || $rij->cp_telefoon );
+    $bel_nr    = $heeft_cp && $rij->cp_telefoon ? $rij->cp_telefoon : $rij->telefoon;
+    $bel_label = $heeft_cp && $rij->cp_telefoon && $rij->cp_voornaam ? 'Bel ' . $rij->cp_voornaam : 'Bellen';
+
+    $acties = '<div class="arr-acties">'
+        . ( $bel_nr ? '<a class="arr-knop arr-knop-wit" href="' . esc_attr( arrahma_telefoon_link( $bel_nr ) ) . '">' . arrahma_icoon( 'tel', 18 ) . esc_html( $bel_label ) . '</a>' : '' )
+        . ( $rij->email ? '<a class="arr-knop arr-knop-glas" href="mailto:' . esc_attr( $rij->email ) . '">' . arrahma_icoon( 'mail', 18 ) . 'Mail</a>' : '' )
+        . '</div>';
+
+    arrahma_docenten_kop( [
+        'boven'       => arrahma_slot_doelgroep( $slot ) . ' · ' . arrahma_niveau_label( $rij->niveau ),
+        'titel'       => $naam,
+        'sub'         => implode( ' · ', array_filter( [ $leeftijd, $klas, $dt['dag'] . ' ' . arrahma_slot_tijden( $slot )['start'] ] ) ),
+        'terug_url'   => $terug,
+        'terug_label' => $eenheid ? arrahma_eenheid_weergave( $eenheid )['titel'] : 'Groepen',
+        'avatar'      => arrahma_initialen( $naam ),
+        'na'          => $acties,
+    ] );
+    arrahma_docenten_melding();
+
+    echo '<div class="arr-inhoud arr-leerling-raster">';
+    arrahma_docenten_leerling_aanwezigheid( $rij );
+    arrahma_docenten_leerling_notities( $rij, $sleutel );
+
+    $gegevens = [];
+    if ( $heeft_cp ) {
+        $gegevens['Contactpersoon'] = trim( $rij->cp_voornaam . ' ' . $rij->cp_achternaam );
+        if ( $rij->cp_telefoon ) $gegevens['Telefoon contactpersoon'] = [ 'tel', $rij->cp_telefoon ];
+    }
+    if ( $rij->telefoon ) $gegevens['Telefoon'] = [ 'tel', $rij->telefoon ];
+    if ( $rij->email )    $gegevens['E-mail']   = [ 'mail', $rij->email ];
+    $gegevens['Adres']         = trim( $rij->adres . ', ' . $rij->postcode . ' ' . $rij->woonplaats, ', ' );
+    $gegevens['Geboortedatum'] = $rij->geboortedatum ? arrahma_format_date( $rij->geboortedatum ) : '';
+    $gegevens['Doelgroep']     = arrahma_category_labels()[ $rij->inschrijving_voor ] ?? $rij->inschrijving_voor;
+    $gegevens['Lesmoment']     = arrahma_roster_label( $slot );
+
+    echo '<section class="arr-kaart arr-kaart-contact"><h3 class="arr-kaart-kop">Contact &amp; gegevens</h3><dl class="arr-dl">';
+    foreach ( $gegevens as $label => $waarde ) {
+        if ( $waarde === '' || $waarde === null ) continue;
+        if ( is_array( $waarde ) ) {
+            $href = $waarde[0] === 'tel' ? arrahma_telefoon_link( $waarde[1] ) : 'mailto:' . $waarde[1];
+            $html = '<a href="' . esc_attr( $href ) . '">' . esc_html( $waarde[1] ) . '</a>';
+        } else {
+            $html = esc_html( $waarde );
+        }
+        echo '<dt>' . esc_html( $label ) . '</dt><dd>' . $html . '</dd>';
+    }
+    echo '</dl></section></div>';
+}
+
+function arrahma_docenten_leerling_aanwezigheid( $rij ): void {
+    global $wpdb;
+    $table = $wpdb->prefix . ARRAHMA_AANWEZIG_TABLE;
+    $rows  = $wpdb->get_results( $wpdb->prepare(
+        "SELECT lesdatum, status FROM {$table} WHERE inschrijving_id = %d ORDER BY lesdatum DESC",
+        (int) $rij->id
+    ) );
+    $labels  = arrahma_aanwezig_statussen();
+    $letters = arrahma_aanwezig_letters();
+    $telling = array_fill_keys( array_keys( $labels ), 0 );
+    foreach ( $rows as $row ) {
+        if ( isset( $telling[ $row->status ] ) ) $telling[ $row->status ]++;
+    }
+
+    echo '<section class="arr-kaart arr-kaart-aanw"><h3 class="arr-kaart-kop">Aanwezigheid</h3>';
+    if ( ! $rows ) {
+        echo '<p class="arr-sub">Nog niets bijgehouden.</p></section>';
+        return;
+    }
+    echo '<div class="arr-telling">';
+    foreach ( $telling as $status => $aantal ) {
+        echo '<span class="arr-chip c-' . esc_attr( $status ) . '">' . arrahma_icoon( $status, 13 ) . (int) $aantal . ' ' . esc_html( strtolower( $labels[ $status ] ) ) . '</span>';
+    }
+    echo '</div>';
+
+    $laatste = array_reverse( array_slice( $rows, 0, 8 ) );
+    echo '<div class="arr-strip" role="list" aria-label="Laatste ' . count( $laatste ) . ' lessen">';
+    foreach ( $laatste as $row ) {
+        echo '<i role="listitem" class="c-' . esc_attr( $row->status ) . '" title="' . esc_attr( arrahma_datum_lang( $row->lesdatum ) . ': ' . ( $labels[ $row->status ] ?? $row->status ) ) . '">'
+            . esc_html( $letters[ $row->status ] ?? '?' ) . '</i>';
+    }
+    echo '</div><div class="arr-strip-data"><span>' . esc_html( date_i18n( 'j M', strtotime( $laatste[0]->lesdatum . ' 12:00:00' ) ) ) . '</span><span>laatste '
+        . count( $laatste ) . ' lessen</span><span>' . esc_html( date_i18n( 'j M', strtotime( end( $laatste )->lesdatum . ' 12:00:00' ) ) ) . '</span></div>';
+
+    echo '<details class="arr-details"><summary>Alle lessen</summary><ul class="arr-historie">';
+    foreach ( $rows as $row ) {
+        echo '<li><span>' . esc_html( arrahma_datum_titel( $row->lesdatum ) ) . '</span><span class="arr-chip c-' . esc_attr( $row->status ) . '">'
+            . arrahma_icoon( $row->status, 13 ) . esc_html( $labels[ $row->status ] ?? $row->status ) . '</span></li>';
+    }
+    echo '</ul></details></section>';
+}
+
+function arrahma_docenten_leerling_notities( $rij, string $sleutel ): void {
+    $id     = (int) $rij->id;
+    $velden = function ( string $actie, int $notitie = 0 ) use ( $id, $sleutel ) {
+        return '<input type="hidden" name="arrahma_notitie_actie" value="' . esc_attr( $actie ) . '">'
+            . '<input type="hidden" name="leerling" value="' . $id . '">'
+            . '<input type="hidden" name="eenheid" value="' . esc_attr( $sleutel ) . '">'
+            . ( $notitie ? '<input type="hidden" name="notitie" value="' . $notitie . '">' : '' )
+            . '<input type="hidden" name="_arrahma_nonce" value="' . esc_attr( wp_create_nonce( 'arrahma_notitie_' . $id ) ) . '">';
+    };
+
+    echo '<section class="arr-kaart arr-kaart-notities" id="notities"><h3 class="arr-kaart-kop">Notities</h3>';
+    echo '<form method="post" class="arr-notitie-form">' . $velden( 'toevoegen' )
+        . '<label class="arr-sr" for="arr-nieuwe-notitie">Nieuwe notitie</label>'
+        . '<textarea id="arr-nieuwe-notitie" name="tekst" rows="3" maxlength="' . ARRAHMA_NOTITIE_MAX . '" placeholder="Schrijf een notitie…" required></textarea>'
+        . '<div class="arr-notitie-voet"><span class="arr-sub">Zichtbaar voor alle docenten en het bestuur</span><button type="submit" class="arr-knop arr-knop-goud arr-knop-klein">Opslaan</button></div></form>';
+
+    $notities = arrahma_notities_van( $id );
+    if ( ! $notities ) echo '<p class="arr-sub">Nog geen notities.</p>';
+    foreach ( $notities as $n ) {
+        $meta = arrahma_gebruiker_naam( (int) $n->auteur ) . ' · ' . date_i18n( 'j M, H:i', strtotime( $n->aangemaakt_op ) )
+              . ( $n->gewijzigd_op ? ' · aangepast' : '' );
+        echo '<article class="arr-notitie"><small>' . esc_html( $meta ) . '</small><p>' . nl2br( esc_html( $n->tekst ) ) . '</p>';
+        if ( arrahma_mag_notitie_wijzigen( $n ) ) {
+            echo '<details class="arr-details"><summary>Aanpassen</summary>'
+                . '<form method="post" class="arr-notitie-form">' . $velden( 'wijzigen', (int) $n->id )
+                . '<label class="arr-sr" for="arr-notitie-' . (int) $n->id . '">Notitie aanpassen</label>'
+                . '<textarea id="arr-notitie-' . (int) $n->id . '" name="tekst" rows="3" maxlength="' . ARRAHMA_NOTITIE_MAX . '" required>' . esc_textarea( $n->tekst ) . '</textarea>'
+                . '<div class="arr-notitie-voet"><button type="submit" class="arr-knop arr-knop-goud arr-knop-klein">Opslaan</button></div></form>'
+                . '<form method="post" onsubmit="return confirm(\'Deze notitie verwijderen?\')">' . $velden( 'verwijderen', (int) $n->id )
+                . '<button type="submit" class="arr-knop arr-knop-gevaar arr-knop-klein">Verwijderen</button></form></details>';
+        }
+        echo '</article>';
+    }
+    echo '</section>';
+}
+
+// ── Scherm: maandoverzicht bestuur ───────────────────────────
+
+/** Eenheden in het maandoverzicht: per blok met leerlingen óf zijn klassen. */
+function arrahma_bestuur_eenheden(): array {
+    $aantallen = arrahma_actieve_aantallen_per_slot();
+    $uit = [];
+    foreach ( array_keys( arrahma_roster_labels() ) as $slot ) {
+        if ( empty( $aantallen[ $slot ] ) ) continue;
+        $klassen = arrahma_klassen_van_slot( $slot );
+        if ( ! $klassen ) {
+            $uit[ $slot ] = arrahma_eenheid( $slot );
+            continue;
+        }
+        foreach ( array_keys( $klassen ) as $klas_id ) {
+            $eenheid = arrahma_eenheid( $klas_id );
+            if ( $eenheid ) $uit[ $klas_id ] = $eenheid;
+        }
+    }
+    return $uit;
+}
+
+function arrahma_docenten_bestuur( string $basis ): void {
+    $vandaag  = arrahma_vandaag();
+    $maand    = arrahma_maand_uit_request( $vandaag );
+    $eerste   = $maand . '-01';
+    $laatste  = ( new DateTimeImmutable( $eerste ) )->format( 'Y-m-t' );
+    $eenheden = arrahma_bestuur_eenheden();
+    $kaart    = arrahma_aanwezigheid_kaart( $eerste, $laatste );
+    $link     = function ( string $m ) use ( $basis ) { return arrahma_docenten_link( $basis, [ 'bestuur' => 1, 'maand' => $m ] ); };
+
+    $nav = '<div class="arr-maandnav"><a class="arr-rond" href="' . esc_url( $link( arrahma_maand_verschuif( $maand, -1 ) ) ) . '" aria-label="Vorige maand">' . arrahma_icoon( 'links', 20 ) . '</a>'
+        . '<a class="arr-rond" href="' . esc_url( $link( arrahma_maand_verschuif( $maand, 1 ) ) ) . '" aria-label="Volgende maand">' . arrahma_icoon( 'rechts', 20 ) . '</a></div>';
+    arrahma_docenten_kop( [
+        'boven'       => 'Bestuur · ' . arrahma_maand_naam( $maand ),
+        'titel'       => 'Alle groepen',
+        'sub'         => 'Klik op een les om de presentielijst te openen.',
+        'terug_url'   => $basis,
+        'terug_label' => 'Groepen',
+        'na'          => $nav,
+    ] );
+
+    // Tellingen voor de zijbalk: alleen verstreken lessen van deze maand.
+    $lessen = 0; $compleet = 0; $ingevuld = 0; $aanwezig = 0; $open = [];
+    $dagen  = [];
+    for ( $d = $eerste; $d <= $laatste; $d = arrahma_verschuif_datum( $d, 1 ) ) $dagen[] = $d;
+
+    echo '<div class="arr-bestuur"><div class="arr-tijdlijn-wrap"><table class="arr-tijdlijn"><thead><tr><th class="arr-gl" scope="col">Groep</th>';
+    foreach ( $dagen as $d ) {
+        $wd = (int) ( new DateTimeImmutable( $d ) )->format( 'N' );
+        echo '<th scope="col" class="' . ( $wd >= 6 ? 'is-we' : '' ) . ( $d === $vandaag ? ' is-vandaag' : '' ) . '">'
+            . esc_html( date_i18n( 'D', strtotime( $d . ' 12:00:00' ) ) ) . '<br>' . (int) substr( $d, 8, 2 ) . '</th>';
+    }
+    echo '</tr></thead><tbody>';
+
+    foreach ( $eenheden as $sleutel => $eenheid ) {
+        $w   = arrahma_eenheid_weergave( $eenheid );
+        $ids = arrahma_eenheid_ids( $eenheid );
+        echo '<tr><th scope="row" class="arr-gn"><b>' . esc_html( $w['boven'] . ' · ' . $w['titel'] ) . '</b><span>' . esc_html( $w['sub'] ) . '</span></th>';
+        foreach ( $dagen as $d ) {
+            $soort = arrahma_dag_soort( $eenheid['slot'], $d );
+            $cls   = ( $soort['vakantie'] !== '' ? 'is-vak' : '' ) . ( $d === $vandaag ? ' is-vandaag' : '' );
+            $inh   = '';
+            if ( $soort['soort'] === 'les' && $d > $vandaag ) {
+                $inh = '<span title="' . esc_attr( arrahma_datum_lang( $d ) . ': nog niet geweest' ) . '">' . arrahma_glyph( 'toekomst' ) . '</span>';
+            } elseif ( $soort['soort'] === 'les' ) {
+                $v = arrahma_voltooiing( $ids, $kaart[ $eenheid['slot'] ][ $d ] ?? [] );
+                if ( $v['totaal'] ) {
+                    $lessen++;
+                    $ingevuld += $v['ingevuld'];
+                    $aanwezig += ( $v['per']['aanwezig'] ?? 0 ) + ( $v['per']['te_laat'] ?? 0 );
+                    if ( $v['staat'] === 'klaar' ) {
+                        $compleet++;
+                    } elseif ( $d < $vandaag ) {
+                        $open[] = [ 'w' => $w, 'd' => $d, 'v' => $v, 'sleutel' => $sleutel ];
+                    }
+                }
+                $url = arrahma_docenten_link( $basis, [ 'eenheid' => $sleutel, 'datum' => $d ] );
+                $inh = '<a href="' . esc_url( $url ) . '" aria-label="' . esc_attr( $w['titel'] . ', ' . arrahma_datum_lang( $d ) . ': ' . arrahma_staat_label( $v ) ) . '">' . arrahma_glyph( $v['staat'] ) . '</a>';
+            } elseif ( $soort['soort'] === 'vervalt' ) {
+                $inh = '<span title="Les vervalt">' . arrahma_glyph( 'vervalt' ) . '</span>';
+            }
+            echo '<td class="' . trim( $cls ) . '">' . $inh . '</td>';
+        }
+        echo '</tr>';
+    }
+    echo '</tbody></table></div>';
+
+    // Zijbalk
+    echo '<aside class="arr-zij"><div class="arr-cijfers">'
+        . '<div class="arr-cijfer"><strong>' . ( $lessen ? round( $compleet / $lessen * 100 ) . '%' : '–' ) . '</strong><span>lessen compleet ingevuld</span></div>'
+        . '<div class="arr-cijfer"><strong>' . ( $ingevuld ? round( $aanwezig / $ingevuld * 100 ) . '%' : '–' ) . '</strong><span>aanwezig of te laat</span></div></div>';
+
+    echo '<div class="arr-zij-blok"><h3>Niet ingevuld</h3>';
+    usort( $open, function ( $a, $b ) { return strcmp( $b['d'], $a['d'] ); } );
+    if ( ! $open ) echo '<p class="arr-sub">Alle verstreken lessen zijn ingevuld.</p>';
+    foreach ( array_slice( $open, 0, 8 ) as $o ) {
+        $url = arrahma_docenten_link( $basis, [ 'eenheid' => $o['sleutel'], 'datum' => $o['d'] ] );
+        echo '<a class="arr-let' . ( $o['v']['staat'] === 'leeg' ? ' is-rood' : '' ) . '" href="' . esc_url( $url ) . '"><b>' . esc_html( $o['w']['boven'] . ' · ' . $o['w']['titel'] ) . '</b>'
+            . '<span>' . esc_html( date_i18n( 'D j M', strtotime( $o['d'] . ' 12:00:00' ) ) . ' · ' . arrahma_staat_label( $o['v'] ) ) . '</span></a>';
+    }
+    echo '</div><div class="arr-zij-blok"><h3>Vaak afwezig zonder bericht</h3>';
+    $signaal = arrahma_signaallijst();
+    if ( ! $signaal ) echo '<p class="arr-sub">Niemand ' . (int) ARRAHMA_SIGNAAL_DREMPEL . '× of vaker in ' . (int) ARRAHMA_SIGNAAL_WEKEN . ' weken.</p>';
+    foreach ( array_slice( $signaal, 0, 8 ) as $r ) {
+        $tel = ! empty( $r->cp_anders ) && $r->cp_telefoon ? $r->cp_telefoon : $r->telefoon;
+        echo '<a class="arr-let" href="' . esc_url( arrahma_docenten_link( $basis, [ 'leerling' => (int) $r->id ] ) ) . '"><b>'
+            . esc_html( trim( $r->voornaam . ' ' . $r->achternaam ) . ' · ' . (int) $r->aantal . '×' ) . '</b><span>'
+            . esc_html( arrahma_slot_doelgroep( (string) $r->rooster ) . ' · laatst ' . date_i18n( 'j M', strtotime( $r->laatste . ' 12:00:00' ) ) . ( $tel ? ' · ' . $tel : '' ) ) . '</span></a>';
+    }
+    echo '</div><p class="arr-sub"><a href="' . esc_url( admin_url( 'admin.php?page=arrahma-aanwezigheid' ) ) . '">Exports en overzicht per groep in wp-admin</a></p></aside></div>';
+
+    echo '<div class="arr-klegenda arr-klegenda-breed">'
+        . '<span>' . arrahma_glyph( 'klaar' ) . 'Compleet</span><span>' . arrahma_glyph( 'deels' ) . 'Deels ingevuld</span>'
+        . '<span>' . arrahma_glyph( 'leeg' ) . 'Niet ingevuld</span><span>' . arrahma_glyph( 'toekomst' ) . 'Nog niet geweest</span>'
+        . '<span>' . arrahma_glyph( 'vervalt' ) . 'Les vervalt</span><span><i class="arr-vak-staal"></i>Vakantie</span></div>';
+}
+
+// ── Iconen en huisstijl ──────────────────────────────────────
+
+/** SVG-sprite; elke status heeft een eigen vorm, zodat kleur nooit de enige aanwijzing is. */
+function arrahma_docenten_iconen(): string {
+    return '<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>'
+        . '<symbol id="arr-i-aanwezig" viewBox="0 0 24 24"><path d="M5 12.5l4.2 4.2L19 7" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/></symbol>'
+        . '<symbol id="arr-i-te_laat" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.2" fill="none" stroke="currentColor" stroke-width="2.2"/><path d="M12 7.5V12l3 2" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/></symbol>'
+        . '<symbol id="arr-i-afgemeld" viewBox="0 0 24 24"><rect x="3.8" y="6" width="16.4" height="12" rx="2.2" fill="none" stroke="currentColor" stroke-width="2.1"/><path d="M4.5 7l7.5 6 7.5-6" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linejoin="round"/></symbol>'
+        . '<symbol id="arr-i-afwezig" viewBox="0 0 24 24"><path d="M7 7l10 10M17 7L7 17" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round"/></symbol>'
+        . '<symbol id="arr-i-links" viewBox="0 0 24 24"><path d="M14.5 6l-6 6 6 6" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></symbol>'
+        . '<symbol id="arr-i-rechts" viewBox="0 0 24 24"><path d="M9.5 6l6 6-6 6" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></symbol>'
+        . '<symbol id="arr-i-lijst" viewBox="0 0 24 24"><path d="M9 7h11M9 12h11M9 17h11" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/><circle cx="4.5" cy="7" r="1.4" fill="currentColor"/><circle cx="4.5" cy="12" r="1.4" fill="currentColor"/><circle cx="4.5" cy="17" r="1.4" fill="currentColor"/></symbol>'
+        . '<symbol id="arr-i-kal" viewBox="0 0 24 24"><rect x="3.5" y="5" width="17" height="15" rx="3" fill="none" stroke="currentColor" stroke-width="2.1"/><path d="M3.5 10h17M8 3v4M16 3v4" stroke="currentColor" stroke-width="2.1" stroke-linecap="round"/></symbol>'
+        . '<symbol id="arr-i-tel" viewBox="0 0 24 24"><path d="M6.6 3.8l2.6-.4 1.6 4.2-1.9 1.4a11 11 0 005.5 5.5l1.4-1.9 4.2 1.6-.4 2.6a2 2 0 01-2.1 1.7A15.6 15.6 0 014.9 5.9a2 2 0 011.7-2.1z" fill="currentColor"/></symbol>'
+        . '<symbol id="arr-i-mail" viewBox="0 0 24 24"><rect x="3.5" y="6" width="17" height="12" rx="2.2" fill="none" stroke="currentColor" stroke-width="2.1"/><path d="M4.5 7.3l7.5 5.7 7.5-5.7" fill="none" stroke="currentColor" stroke-width="2.1"/></symbol>'
+        . '<symbol id="arr-i-wolk" viewBox="0 0 24 24"><path d="M7 18h10a4 4 0 00.6-8A6 6 0 006.2 9.3 4.4 4.4 0 007 18z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/><path d="M9 13.5l2 2 4-4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></symbol>'
+        . '<symbol id="arr-i-zon" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4.2" fill="none" stroke="currentColor" stroke-width="2"/><path d="M12 2.5v2.4M12 19.1v2.4M2.5 12h2.4M19.1 12h2.4M5.3 5.3L7 7M17 17l1.7 1.7M5.3 18.7L7 17M17 7l1.7-1.7" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></symbol>'
+        . '<symbol id="arr-i-link" viewBox="0 0 24 24"><path d="M10 14a4 4 0 005.7 0l3-3a4 4 0 00-5.7-5.7l-1 1M14 10a4 4 0 00-5.7 0l-3 3a4 4 0 005.7 5.7l1-1" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round"/></symbol>'
+        . '<symbol id="arr-i-klok" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.2" fill="none" stroke="currentColor" stroke-width="2"/><path d="M12 7.5V12l3 2" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></symbol>'
+        . '<symbol id="arr-g-leeg" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8" fill="#fff" stroke="#98a4a9" stroke-width="2"/></symbol>'
+        . '<symbol id="arr-g-deels" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8" fill="#fff" stroke="#db9f30" stroke-width="2"/><path d="M12 4a8 8 0 010 16z" fill="#db9f30"/></symbol>'
+        . '<symbol id="arr-g-klaar" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9" fill="#2e7d32"/><path d="M7.5 12.3l3 3 6-6.3" fill="none" stroke="#fff" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round"/></symbol>'
+        . '<symbol id="arr-g-toekomst" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8" fill="none" stroke="#b5bfc2" stroke-width="2" stroke-dasharray="2.6 2.6"/></symbol>'
+        . '<symbol id="arr-g-vervalt" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8" fill="none" stroke="#b5bfc2" stroke-width="2"/><path d="M6.5 17.5l11-11" stroke="#b5bfc2" stroke-width="2"/></symbol>'
+        . '</defs></svg>';
+}
+
+function arrahma_docenten_css(): string {
+    // Huisstijl van vereniging-arrahma.nl: Open Sans, leisteen #323F44 (header/footer), goud #DB9F30
+    // (knoppen), tekst #272727, pilvormige knoppen. Roboto Slab alleen voor datums, zoals de koranteksten op de site.
+    // Alles hangt onder .arr-doc, zodat het thema er niet in kan grijpen en andersom.
+    // Lettertypen: de site laadt Open Sans en Roboto Slab zelf (Elementor, lokaal); geen Google-verzoek hier.
+    return '<style>
+.arr-doc{--leisteen:#323f44;--leisteen-diep:#263034;--leisteen-zacht:#e7ebec;--goud:#db9f30;--goud-diep:#a8741a;--goud-zacht:#f8ecd3;
+  --inkt:#272727;--muted:#66727a;--lijn:#e2e6e7;--vlak:#fff;--grond:#eef1f1;--groen:#2e7d32;--groen-zacht:#e3f1e4;--rood:#c62828;--rood-zacht:#fbe6e6;
+  --sans:"Open Sans",system-ui,-apple-system,"Segoe UI",sans-serif;--slab:"Roboto Slab",Georgia,serif;
+  --breedte:640px;width:100%;margin:0;background:var(--grond);color:var(--inkt);font-family:var(--sans);font-size:15px;line-height:1.45;
+  min-height:100vh;min-height:100dvh;-webkit-font-smoothing:antialiased}
+.arr-doc .arr-hoofd{max-width:var(--breedte);margin:0 auto;padding-bottom:24px}
+.arr-doc *{box-sizing:border-box}
+.arr-doc a{color:var(--leisteen)}
+.arr-doc h2,.arr-doc h3{font-family:var(--sans);letter-spacing:0;text-transform:none}
+.arr-doc :focus-visible{outline:3px solid rgba(219,159,48,.6);outline-offset:2px}
+.arr-doc .arr-i{flex:none;display:inline-block;vertical-align:middle}
+.arr-doc .arr-sr{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
+.arr-doc .arr-sub{color:var(--muted);font-size:.84rem;margin:0}
+.arr-doc .arr-muted{color:var(--muted)}
+
+.arr-doc .arr-kop{background:var(--leisteen-diep);color:#fff;padding:16px max(18px,calc((100% - var(--breedte))/2 + 18px)) 18px;display:grid;gap:12px}
+.arr-doc .arr-kop-na{display:grid;gap:12px}
+.arr-doc .arr-kop-rij{display:flex;justify-content:space-between;align-items:center;gap:8px;min-height:24px}
+.arr-doc .arr-terug{display:inline-flex;align-items:center;gap:4px;color:#cfd6d8;font-size:.84rem;font-weight:600;text-decoration:none}
+.arr-doc .arr-terug:hover{color:#fff}
+.arr-doc .arr-boven{font-size:.7rem;font-weight:800;letter-spacing:.12em;text-transform:uppercase;color:var(--goud);text-align:right}
+.arr-doc .arr-kop-rij>.arr-boven:first-child{text-align:left}
+.arr-doc .arr-kop-titel{display:flex;gap:14px;align-items:center}
+.arr-doc .arr-kop h2{margin:0;color:#fff;font-size:1.35rem;font-weight:700;line-height:1.2;text-wrap:balance}
+.arr-doc .arr-kop-sub{margin:2px 0 0;color:#b9c3c6;font-size:.85rem}
+.arr-doc .arr-wissel{display:grid;grid-template-columns:1fr 1fr;background:rgba(255,255,255,.08);border-radius:50px;padding:4px;gap:4px}
+.arr-doc .arr-wissel a{display:flex;justify-content:center;align-items:center;gap:6px;min-height:38px;border-radius:50px;font-weight:600;font-size:.86rem;color:#cfd6d8;text-decoration:none}
+.arr-doc .arr-wissel a[aria-current]{background:#fff;color:var(--leisteen-diep)}
+.arr-doc .arr-datumnav{display:grid;grid-template-columns:44px 1fr 44px;align-items:center;gap:8px}
+.arr-doc .arr-maandnav{display:flex;gap:8px}
+.arr-doc .arr-rond{width:44px;height:44px;border-radius:50%;display:grid;place-items:center;background:rgba(255,255,255,.1);color:#fff;text-decoration:none}
+.arr-doc a.arr-rond:hover{background:var(--goud);color:var(--inkt)}
+.arr-doc .arr-rond.is-uit{opacity:.3}
+.arr-doc .arr-datum{text-align:center}
+.arr-doc .arr-datum strong{display:block;font-family:var(--slab);font-weight:600;font-size:1.15rem}
+.arr-doc .arr-datum small{color:#b9c3c6;font-size:.8rem}
+.arr-doc .arr-pill{display:inline-block;background:var(--goud);color:var(--inkt);font-size:.68rem;font-weight:800;letter-spacing:.06em;text-transform:uppercase;border-radius:50px;padding:2px 8px;vertical-align:1px}
+
+.arr-doc .arr-knop{display:inline-flex;align-items:center;justify-content:center;gap:8px;min-height:48px;padding:0 22px;border-radius:50px;font:700 .92rem/1.2 var(--sans);cursor:pointer;text-align:center;text-decoration:none;border:2px solid transparent;transition:background-color .15s,color .15s,border-color .15s}
+.arr-doc button.arr-knop{appearance:none;-webkit-appearance:none;box-shadow:none;text-transform:none;letter-spacing:0}
+.arr-doc .arr-knop-goud{background:var(--goud);border-color:var(--goud);color:#fff}
+.arr-doc .arr-knop-goud:hover{background:var(--goud-diep);border-color:var(--goud-diep);color:#fff}
+.arr-doc .arr-knop-leisteen{background:var(--leisteen);border-color:var(--leisteen);color:#fff}
+.arr-doc .arr-knop-leisteen:hover{background:var(--leisteen-diep)}
+.arr-doc .arr-knop-leisteen:disabled{opacity:.5;cursor:wait}
+.arr-doc .arr-knop-rand{background:#fff;border:1.5px solid var(--leisteen);color:var(--leisteen)}
+.arr-doc .arr-knop-rand:hover{background:var(--leisteen);color:#fff}
+.arr-doc .arr-knop-wit{background:#fff;color:var(--leisteen-diep);min-height:44px}
+.arr-doc .arr-knop-glas{background:rgba(255,255,255,.1);color:#fff;min-height:44px}
+.arr-doc .arr-knop-licht-op-donker{background:rgba(255,255,255,.1);color:#fff;min-height:42px;justify-self:start}
+.arr-doc .arr-knop-licht-op-donker:hover{background:var(--goud);color:var(--inkt)}
+.arr-doc .arr-knop-gevaar{background:#fff;border:1.5px solid var(--rood);color:var(--rood)}
+.arr-doc .arr-knop-gevaar:hover{background:var(--rood);color:#fff}
+.arr-doc .arr-knop-klein{min-height:40px;padding:0 16px;font-size:.84rem}
+.arr-doc .arr-knop-breed{width:100%}
+.arr-doc .arr-linkje{color:var(--leisteen);font-weight:600;font-size:.88rem;text-align:center;text-decoration-color:var(--goud);text-underline-offset:3px}
+
+.arr-doc .arr-melding{margin:12px 16px 0;padding:10px 14px;border-radius:14px;background:#fbf3e3;border:1px solid #efd4a0;font-size:.9rem}
+.arr-doc .arr-melding.is-ok{background:var(--groen-zacht);border-color:#b5d9b8}
+.arr-doc .arr-inhoud{padding:16px;display:grid;gap:12px}
+.arr-doc .arr-lijstkop{font-size:.72rem;font-weight:800;letter-spacing:.12em;text-transform:uppercase;color:var(--muted);margin:8px 4px 0}
+
+.arr-doc .arr-chip{display:inline-flex;align-items:center;gap:4px;border-radius:50px;padding:2px 9px 2px 6px;font-size:.74rem;font-weight:700;font-variant-numeric:tabular-nums;white-space:nowrap}
+.arr-doc .c-aanwezig{background:var(--groen-zacht);color:var(--groen)}
+.arr-doc .c-te_laat{background:var(--goud-zacht);color:#7a5410}
+.arr-doc .c-afgemeld{background:var(--leisteen-zacht);color:var(--leisteen)}
+.arr-doc .c-afwezig{background:var(--rood-zacht);color:var(--rood)}
+.arr-doc .c-neutraal{background:var(--grond);color:var(--leisteen)}
+.arr-doc .arr-telling{display:flex;gap:6px;flex-wrap:wrap}
+
+/* Inloggen */
+.arr-doc .arr-login{background:var(--leisteen-diep);min-height:100vh;min-height:100dvh;display:flex;justify-content:center}
+.arr-doc .arr-login-kolom{width:100%;max-width:480px;display:flex;flex-direction:column}
+.arr-doc .arr-login-top{padding:44px 28px 30px;display:grid;justify-items:center;gap:16px;text-align:center;color:#fff}
+.arr-doc .arr-login-top img{width:150px;height:auto}
+.arr-doc .arr-login-top p{margin:6px 0 0;color:#b9c3c6;max-width:30ch}
+.arr-doc .arr-woordmerk{font-size:1.8rem;letter-spacing:.08em}
+.arr-doc .arr-login-top .arr-boven{text-align:center}
+.arr-doc .arr-login-kaart{flex:1;background:var(--grond);border-radius:28px 28px 0 0;padding:26px 22px 32px;display:grid;gap:14px;align-content:start}
+.arr-doc .arr-login-kaart form{display:grid;gap:14px;margin:0}
+.arr-doc .arr-login-kaart form p{margin:0;display:grid;gap:6px}
+.arr-doc .arr-login-kaart label{font-size:.82rem;font-weight:700;color:#4b565b;padding-left:14px}
+.arr-doc .arr-login-kaart input[type=text],.arr-doc .arr-login-kaart input[type=password]{width:100%;font:inherit;min-height:50px;padding:0 18px;border:1.5px solid #d5dadb;border-radius:50px;background:#fff;color:var(--inkt)}
+.arr-doc .arr-login-kaart input[type=text]:focus,.arr-doc .arr-login-kaart input[type=password]:focus{outline:none;border-color:var(--leisteen);box-shadow:0 0 0 3px rgba(219,159,48,.35)}
+.arr-doc .arr-login-kaart .login-remember label{display:flex;align-items:center;gap:10px;font-weight:400;font-size:.88rem;padding-left:6px;color:var(--inkt)}
+.arr-doc .arr-login-kaart input[type=checkbox]{width:20px;height:20px;accent-color:var(--leisteen)}
+.arr-doc .arr-login-kaart input[type=submit]{appearance:none;-webkit-appearance:none;width:100%;min-height:50px;border-radius:50px;border:2px solid var(--goud);background:var(--goud);color:#fff;font:700 .95rem var(--sans);cursor:pointer}
+.arr-doc .arr-login-kaart input[type=submit]:hover{background:var(--goud-diep);border-color:var(--goud-diep)}
+
+/* Mijn groepen */
+.arr-doc .arr-vandaag{background:var(--vlak);border-radius:22px;padding:18px;display:grid;gap:14px;box-shadow:0 10px 24px -14px rgba(38,48,52,.35);border:1.5px solid var(--goud)}
+.arr-doc .arr-vandaag-kop{display:flex;justify-content:space-between;align-items:flex-start;gap:10px}
+.arr-doc .arr-vandaag h3{margin:6px 0 2px;font-size:1.15rem;line-height:1.25;color:var(--inkt)}
+.arr-doc .arr-meta{color:var(--muted);font-size:.84rem;margin:0}
+.arr-doc .arr-tijd{font-family:var(--slab);font-weight:600;font-size:1.6rem;color:var(--leisteen);line-height:1;text-align:right;font-variant-numeric:tabular-nums}
+.arr-doc .arr-tijd small{display:block;font-family:var(--sans);font-size:.7rem;font-weight:700;color:var(--muted);margin-top:4px;text-transform:uppercase;letter-spacing:.06em}
+.arr-doc .arr-groep{display:flex;align-items:center;gap:12px;background:var(--vlak);border-radius:18px;padding:14px 16px;text-decoration:none;color:var(--inkt);border:1px solid var(--lijn)}
+.arr-doc .arr-groep:hover{border-color:var(--leisteen)}
+.arr-doc .arr-blok{flex:none;width:44px;height:44px;border-radius:14px;background:var(--leisteen-zacht);display:grid;place-items:center;font-size:.74rem;font-weight:800;color:var(--leisteen)}
+.arr-doc .arr-groep-tekst{flex:1;min-width:0;display:grid}
+.arr-doc .arr-groep-tekst b{font-size:.95rem}
+.arr-doc .arr-groep-tekst span{font-size:.8rem;color:var(--muted)}
+.arr-doc .arr-aantal{flex:none;font-weight:800;font-size:.8rem;font-variant-numeric:tabular-nums;color:var(--leisteen)}
+.arr-doc .arr-groep.is-open{border-color:#f1c9c9}
+.arr-doc .arr-groep.is-open .arr-blok{background:var(--rood-zacht);color:var(--rood)}
+.arr-doc .arr-groep.is-open .arr-aantal{color:var(--rood)}
+
+/* Presentielijst */
+.arr-doc .arr-voortgang{background:var(--vlak);padding:12px 18px;border-bottom:1px solid var(--lijn);display:grid;gap:8px}
+.arr-doc .arr-voortgang-rij{display:flex;justify-content:space-between;font-size:.85rem;font-variant-numeric:tabular-nums}
+.arr-doc .arr-balk{height:6px;border-radius:6px;background:var(--leisteen-zacht);overflow:hidden}
+.arr-doc .arr-balk i{display:block;height:100%;width:0;background:var(--goud);border-radius:6px;transition:width .25s}
+.arr-doc .arr-st-legenda{display:grid;grid-template-columns:1fr repeat(4,44px);gap:4px;align-items:center;padding:10px 12px 6px 18px;font-size:.62rem;font-weight:700;color:var(--muted);text-align:center;text-transform:uppercase;letter-spacing:.04em}
+.arr-doc .arr-st-legenda span:first-child{text-align:left}
+.arr-doc .arr-presentie{background:var(--vlak);border-top:1px solid var(--lijn)}
+.arr-doc .arr-sectie{margin:0;font-size:.7rem;font-weight:800;letter-spacing:.12em;text-transform:uppercase;color:var(--goud-diep);padding:14px 18px 6px;background:var(--grond);border-bottom:1px solid var(--lijn)}
+.arr-doc .arr-rij-leeg{padding:12px 18px}
+.arr-doc .arr-rij{display:flex;align-items:center;gap:10px;padding:8px 12px 8px 18px;border-bottom:1px solid var(--lijn);transition:background-color .15s}
+.arr-doc .arr-av{flex:none;width:34px;height:34px;border-radius:50%;display:grid;place-items:center;font-size:.72rem;font-weight:800;color:var(--leisteen);background:var(--leisteen-zacht)}
+.arr-doc .arr-av-groot{width:52px;height:52px;font-size:1rem;background:var(--goud);color:var(--inkt)}
+.arr-doc .arr-naam{flex:1;min-width:0}
+.arr-doc .arr-naam a{display:block;font-weight:600;color:var(--inkt);text-decoration:none;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.arr-doc .arr-naam a:hover{text-decoration:underline}
+.arr-doc .arr-naam small{display:block;font-size:.74rem;font-weight:600;min-height:1.1em}
+.arr-doc .arr-naam small.is-leeg{color:var(--muted);font-weight:400}
+.arr-doc .arr-naam small.is-fout{color:var(--rood)}
+.arr-doc .arr-naam small.t-aanwezig{color:var(--groen)}
+.arr-doc .arr-naam small.t-te_laat{color:#7a5410}
+.arr-doc .arr-naam small.t-afgemeld{color:var(--leisteen)}
+.arr-doc .arr-naam small.t-afwezig{color:var(--rood)}
+.arr-doc .arr-st{display:flex;gap:4px}
+.arr-doc .arr-st-tekst{display:none}
+.arr-doc .arr-st button{appearance:none;-webkit-appearance:none;margin:0;padding:0;box-shadow:none;width:44px;height:44px;border-radius:50px;display:inline-flex;align-items:center;justify-content:center;gap:6px;font:600 .82rem var(--sans);border:1.5px solid var(--lijn);color:#8a969b;background:#fff;cursor:pointer;transition:background-color .15s,color .15s,border-color .15s}
+.arr-doc .arr-st button:hover{border-color:var(--leisteen);color:var(--leisteen);background:#fff}
+.arr-doc .arr-st button[aria-pressed=true][data-s=aanwezig]{background:var(--groen);border-color:var(--groen);color:#fff}
+.arr-doc .arr-st button[aria-pressed=true][data-s=te_laat]{background:var(--goud);border-color:var(--goud);color:var(--inkt)}
+.arr-doc .arr-st button[aria-pressed=true][data-s=afgemeld]{background:var(--leisteen);border-color:var(--leisteen);color:#fff}
+.arr-doc .arr-st button[aria-pressed=true][data-s=afwezig]{background:var(--rood);border-color:var(--rood);color:#fff}
+.arr-doc .arr-rij.is-bezig .arr-st{opacity:.6}
+.arr-doc .arr-rij.is-fout{background:#fff8f8;box-shadow:inset 3px 0 0 var(--rood)}
+.arr-doc .arr-actiebalk{position:sticky;bottom:0;z-index:2;padding:14px 16px calc(14px + env(safe-area-inset-bottom,0px));background:linear-gradient(to top,var(--grond) 72%,rgba(238,241,241,0));display:flex;gap:10px;align-items:center}
+.arr-doc .arr-opgeslagen{flex:1;display:flex;align-items:center;gap:6px;font-size:.82rem;color:var(--muted)}
+.arr-doc .arr-opgeslagen .arr-i{color:var(--groen)}
+.arr-doc .arr-opgeslagen.is-fout{color:var(--rood)}
+.arr-doc .arr-opgeslagen.is-fout .arr-i{color:var(--rood)}
+
+/* Kalender */
+.arr-doc .arr-maand{background:var(--vlak);margin:14px 12px 0;border-radius:22px;padding:14px 10px 12px;border:1px solid var(--lijn)}
+.arr-doc .arr-maand-kop{display:flex;justify-content:space-between;align-items:center;padding:0 4px 10px}
+.arr-doc .arr-maand-kop strong{font-family:var(--slab);font-weight:600;font-size:1.1rem;color:var(--leisteen)}
+.arr-doc .arr-klein{width:40px;height:40px;border-radius:50%;display:grid;place-items:center;background:var(--grond);color:var(--leisteen);text-decoration:none}
+.arr-doc .arr-klein:hover{background:var(--leisteen-zacht)}
+.arr-doc .arr-raster{display:grid;grid-template-columns:repeat(7,1fr);gap:3px}
+.arr-doc .arr-wd{font-size:.66rem;font-weight:800;color:var(--muted);text-align:center;padding-bottom:4px;letter-spacing:.04em}
+.arr-doc .arr-dag{min-height:58px;border-radius:12px;display:flex;flex-direction:column;align-items:center;gap:3px;padding-top:6px;font-size:.8rem;font-weight:600;color:#9aa4a8;font-variant-numeric:tabular-nums;position:relative;text-decoration:none}
+.arr-doc .arr-dag.is-les{color:var(--inkt);background:var(--grond)}
+.arr-doc .arr-dag.is-les:hover{background:var(--leisteen-zacht)}
+.arr-doc .arr-dag.is-vak{background:repeating-linear-gradient(135deg,#f3ead7 0 6px,#f8f1e3 6px 12px);color:#a08450}
+.arr-doc .arr-dag.is-vandaag{box-shadow:inset 0 0 0 2px var(--goud)}
+.arr-doc .arr-dag.is-toekomst{background:#fff;border:1.5px dashed #cdd4d6;color:var(--muted)}
+.arr-doc .arr-dag.is-vervalt .arr-num{text-decoration:line-through}
+.arr-doc .arr-dag.is-extra::after{content:"extra";position:absolute;top:-6px;right:-2px;background:var(--goud);color:var(--inkt);font-size:.52rem;font-weight:800;border-radius:50px;padding:1px 5px;text-transform:uppercase}
+.arr-doc .arr-mini{font-size:.6rem;font-weight:800;line-height:1}
+.arr-doc .arr-mini.is-rood{color:var(--rood)}
+.arr-doc .arr-dag-teller{display:none;font-size:.66rem;color:var(--muted);font-weight:700}
+.arr-doc .arr-vak-label{display:flex;align-items:center;gap:8px;font-size:.76rem;font-weight:700;color:#8a6a2c;margin:10px 6px 0}
+.arr-doc .arr-klegenda{display:grid;grid-template-columns:1fr 1fr;gap:8px 12px;margin:12px 16px 0;font-size:.76rem;color:#4b565b}
+.arr-doc .arr-klegenda span{display:flex;align-items:center;gap:8px}
+.arr-doc .arr-klegenda-breed{grid-template-columns:repeat(auto-fit,minmax(150px,1fr));margin:0 20px 8px}
+.arr-doc .arr-vak-staal{display:inline-block;width:18px;height:14px;border-radius:4px;background:repeating-linear-gradient(135deg,#eadcbd 0 4px,#f8f1e3 4px 8px)}
+.arr-doc .arr-volgende{margin:14px 12px 0;background:var(--vlak);border-radius:18px;border:1px solid var(--lijn);padding:12px 16px;display:flex;justify-content:space-between;align-items:center;gap:10px}
+.arr-doc .arr-volgende div{display:grid}
+.arr-doc .arr-volgende span{font-size:.8rem;color:var(--muted)}
+
+/* Leerling */
+.arr-doc .arr-acties{display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:10px}
+.arr-doc .arr-kaart{background:var(--vlak);border-radius:20px;padding:16px;border:1px solid var(--lijn);display:grid;gap:10px}
+.arr-doc .arr-kaart-kop{margin:0;font-size:.7rem;font-weight:800;letter-spacing:.12em;text-transform:uppercase;color:var(--goud-diep)}
+.arr-doc .arr-dl{display:grid;grid-template-columns:auto 1fr;gap:6px 14px;margin:0;font-size:.88rem}
+.arr-doc .arr-dl dt{color:var(--muted)}
+.arr-doc .arr-dl dd{margin:0;font-weight:600;overflow-wrap:anywhere}
+.arr-doc .arr-strip{display:flex;gap:4px}
+.arr-doc .arr-strip i{flex:1;height:30px;border-radius:8px;display:grid;place-items:center;font-style:normal;font-size:.72rem;font-weight:800}
+.arr-doc .arr-strip-data{display:flex;justify-content:space-between;font-size:.66rem;color:var(--muted);margin-top:-4px}
+.arr-doc .arr-details summary{cursor:pointer;color:var(--leisteen);font-weight:600;font-size:.86rem}
+.arr-doc .arr-historie{list-style:none;margin:8px 0 0;padding:0}
+.arr-doc .arr-historie li{display:flex;justify-content:space-between;align-items:center;gap:10px;padding:6px 0;border-top:1px solid var(--lijn);font-size:.86rem}
+.arr-doc .arr-notitie-form{display:grid;gap:8px;margin:0}
+.arr-doc .arr-notitie-form textarea{width:100%;font:inherit;color:var(--inkt);padding:12px 16px;border:1.5px solid #d5dadb;border-radius:18px;min-height:84px;background:#fff;resize:vertical}
+.arr-doc .arr-notitie-form textarea:focus{outline:none;border-color:var(--leisteen);box-shadow:0 0 0 3px rgba(219,159,48,.35)}
+.arr-doc .arr-notitie-voet{display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap}
+.arr-doc .arr-notitie{display:grid;gap:4px;padding-top:10px;border-top:1px solid var(--lijn)}
+.arr-doc .arr-notitie small{color:var(--muted);font-size:.76rem}
+.arr-doc .arr-notitie p{margin:0;font-size:.9rem}
+.arr-doc .arr-notitie .arr-details{display:grid;gap:8px}
+.arr-doc .arr-notitie form+form{margin-top:8px}
+
+/* Lege toestanden */
+.arr-doc .arr-leeg{display:grid;justify-items:center;text-align:center;gap:12px;padding:48px 28px}
+.arr-doc .arr-leeg-icoon{width:72px;height:72px;border-radius:50%;background:var(--goud-zacht);display:grid;place-items:center;color:var(--goud-diep)}
+.arr-doc .arr-leeg-icoon.is-leisteen{background:var(--leisteen-zacht);color:var(--leisteen)}
+.arr-doc .arr-leeg h3{margin:0;font-size:1.15rem;color:var(--inkt)}
+.arr-doc .arr-leeg p{margin:0;color:var(--muted);max-width:32ch}
+
+/* Maandoverzicht bestuur */
+.arr-doc .arr-bestuur{display:grid;grid-template-columns:minmax(0,1fr) 280px;align-items:start}
+.arr-doc .arr-tijdlijn-wrap{overflow-x:auto;padding:18px 16px}
+.arr-doc .arr-tijdlijn{border-collapse:separate;border-spacing:0 6px;font-size:.8rem;min-width:100%}
+.arr-doc .arr-tijdlijn thead th{font-weight:700;color:var(--muted);font-size:.64rem;text-align:center;padding:0 0 4px;font-variant-numeric:tabular-nums;min-width:24px;text-transform:lowercase;background:none;border:0}
+.arr-doc .arr-tijdlijn th.arr-gl{text-align:left;font-size:.68rem;letter-spacing:.1em;text-transform:uppercase}
+.arr-doc .arr-tijdlijn th.is-we{color:var(--leisteen)}
+.arr-doc .arr-tijdlijn thead th.is-vandaag{color:var(--goud-diep)}
+.arr-doc .arr-tijdlijn td,.arr-doc .arr-tijdlijn .arr-gn{background:var(--vlak);height:42px;text-align:center;padding:0;border:0;border-top:1px solid var(--lijn);border-bottom:1px solid var(--lijn)}
+.arr-doc .arr-tijdlijn .arr-gn{text-align:left;padding:6px 12px;border-left:1px solid var(--lijn);border-radius:12px 0 0 12px;min-width:170px;max-width:210px;position:sticky;left:0;z-index:1;font-weight:400;line-height:1.25}
+.arr-doc .arr-gn b{display:block;font-size:.82rem}
+.arr-doc .arr-gn span{color:var(--muted);font-size:.7rem}
+.arr-doc .arr-tijdlijn td:last-child{border-right:1px solid var(--lijn);border-radius:0 12px 12px 0}
+.arr-doc .arr-tijdlijn td.is-vak{background:repeating-linear-gradient(135deg,#f3ead7 0 5px,#f8f1e3 5px 10px)}
+.arr-doc .arr-tijdlijn td.is-vandaag{background:var(--goud-zacht)}
+.arr-doc .arr-tijdlijn a{display:grid;place-items:center;height:100%;border-radius:8px}
+.arr-doc .arr-tijdlijn a:hover{background:var(--leisteen-zacht)}
+.arr-doc .arr-zij{background:var(--vlak);border-left:1px solid var(--lijn);padding:20px;display:grid;gap:18px;align-content:start;min-height:100%}
+.arr-doc .arr-zij h3{margin:0 0 8px;font-size:.72rem;letter-spacing:.12em;text-transform:uppercase;color:var(--goud-diep)}
+.arr-doc .arr-zij-blok{display:grid;gap:8px}
+.arr-doc .arr-let{display:grid;gap:2px;padding:10px 12px;border-radius:12px;background:var(--grond);font-size:.8rem;text-decoration:none;color:var(--inkt)}
+.arr-doc .arr-let:hover{background:var(--leisteen-zacht)}
+.arr-doc .arr-let b{font-size:.84rem}
+.arr-doc .arr-let span{color:var(--muted)}
+.arr-doc .arr-let.is-rood{background:var(--rood-zacht)}
+.arr-doc .arr-cijfers{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.arr-doc .arr-cijfer{background:var(--grond);border-radius:14px;padding:12px}
+.arr-doc .arr-cijfer strong{display:block;font-family:var(--slab);font-size:1.5rem;color:var(--leisteen);font-variant-numeric:tabular-nums}
+.arr-doc .arr-cijfer span{font-size:.74rem;color:var(--muted)}
+
+@media (max-width:900px){.arr-doc .arr-bestuur{grid-template-columns:1fr}.arr-doc .arr-zij{border-left:0;border-top:1px solid var(--lijn)}}
+@media (max-width:380px){.arr-doc .arr-st{gap:2px}.arr-doc .arr-st button{width:40px;height:40px}.arr-doc .arr-st-legenda{grid-template-columns:1fr repeat(4,40px);gap:2px}.arr-doc .arr-rij{padding-left:12px}.arr-doc .arr-av{display:none}}
+@media (prefers-reduced-motion:reduce){.arr-doc *{transition:none!important}}
+/* Schermbreedtes per scherm */
+.arr-doc.scherm-overzicht{--breedte:1040px}
+.arr-doc.scherm-lijst{--breedte:960px}
+.arr-doc.scherm-kalender,.arr-doc.scherm-leerling{--breedte:1120px}
+.arr-doc.scherm-bestuur{--breedte:1480px}
+
+/* Tablet en groter: statusknoppen met tekst */
+@media (min-width:700px){
+  .arr-doc .arr-st{gap:6px}
+  .arr-doc .arr-st button{width:auto;min-width:108px;height:42px;padding:0 14px}
+  .arr-doc .arr-st-tekst{display:inline}
+  .arr-doc .arr-st-legenda{display:none}
+  .arr-doc .arr-rij{padding:10px 18px}
+  .arr-doc .arr-voortgang{margin:16px 16px 0;border:1px solid var(--lijn);border-radius:18px}
+  .arr-doc .arr-presentie{margin:12px 16px 0;border:1px solid var(--lijn);border-radius:18px;overflow:hidden}
+  .arr-doc .arr-rij:last-child{border-bottom:0}
+  .arr-doc .arr-actiebalk{padding-inline:16px}
+}
+
+/* Desktop */
+@media (min-width:960px){
+  .arr-doc .arr-kop{grid-template-columns:minmax(0,1fr) auto;column-gap:32px;align-items:end;padding-top:22px;padding-bottom:24px}
+  .arr-doc .arr-kop-rij{grid-column:1/-1}
+  .arr-doc .arr-kop h2{font-size:1.75rem}
+  .arr-doc .arr-kop-na{display:flex;align-items:center;gap:16px}
+  .arr-doc .arr-kop-na .arr-wissel{width:260px}
+  .arr-doc .arr-kop-na .arr-datumnav{width:380px}
+  .arr-doc .arr-kop-na .arr-acties{width:340px}
+  .arr-doc .arr-inhoud{padding:24px 16px}
+
+  .arr-doc.scherm-overzicht .arr-inhoud{grid-template-columns:repeat(2,minmax(0,1fr));gap:14px 18px;align-items:start}
+  .arr-doc.scherm-overzicht .arr-lijstkop,.arr-doc.scherm-overzicht .arr-linkje{grid-column:1/-1}
+
+  .arr-doc .arr-kal-layout{display:grid;grid-template-columns:minmax(0,1fr) 300px;gap:20px;padding:24px 16px 0;align-items:start}
+  .arr-doc .arr-kal-layout .arr-maand{margin:0;padding:18px 16px}
+  .arr-doc .arr-kal-zij{display:grid;gap:14px}
+  .arr-doc .arr-kal-zij .arr-klegenda{grid-template-columns:1fr;margin:0;background:var(--vlak);border:1px solid var(--lijn);border-radius:18px;padding:16px}
+  .arr-doc .arr-kal-zij .arr-volgende{margin:0}
+  .arr-doc .arr-raster{gap:6px}
+  .arr-doc .arr-dag{min-height:96px;padding:10px 8px;align-items:flex-start;font-size:.95rem;gap:6px}
+  .arr-doc .arr-dag .arr-glyph{width:24px;height:24px}
+  .arr-doc .arr-dag-teller{display:block}
+  .arr-doc .arr-mini{font-size:.7rem}
+  .arr-doc .arr-wd{font-size:.72rem;text-align:left;padding-left:8px}
+
+  .arr-doc .arr-leerling-raster{grid-template-columns:minmax(0,1fr) minmax(0,1fr);grid-template-rows:auto 1fr;align-items:start;gap:18px}
+  .arr-doc .arr-kaart-aanw{grid-column:1;grid-row:1}
+  .arr-doc .arr-kaart-contact{grid-column:1;grid-row:2}
+  .arr-doc .arr-kaart-notities{grid-column:2;grid-row:1/span 2}
+
+  .arr-doc .arr-login-kolom{justify-content:center;padding:40px 0}
+  .arr-doc .arr-login-kaart{flex:none;border-radius:28px;box-shadow:0 30px 60px -30px rgba(0,0,0,.6)}
+}
+
+/* De docentenpagina vult het hele scherm: geen marges of maximale breedte van Elementor eromheen. */
+body.arr-docentenpagina{margin:0;background:#eef1f1}
+body.arr-docentenpagina :is(.elementor-section,.elementor-container,.elementor-column,.elementor-widget-wrap,.elementor-widget-container,.e-con,.e-con-inner),
+:is(.elementor-section,.elementor-container,.elementor-column,.elementor-widget-wrap,.elementor-widget-container,.e-con,.e-con-inner):has(.arr-doc){
+  padding:0!important;margin:0!important;max-width:none!important;width:100%!important;gap:0!important;
+  --padding-top:0px;--padding-right:0px;--padding-bottom:0px;--padding-left:0px;--gap:0px;--row-gap:0px;--column-gap:0px;--content-width:100%}
+body.arr-docentenpagina .elementor-widget:not(:last-child){margin-bottom:0!important}
+</style>';
+}
+
+// ── Beheer: klassen, lesrooster en docenten ──────────────────
+
+add_action( 'admin_menu', function () {
+    add_submenu_page( 'arrahma-inschrijvingen', 'Klassen & docenten', 'Klassen & docenten', 'manage_options', 'arrahma-klassen', 'arrahma_klassen_page' );
+    add_submenu_page( 'arrahma-inschrijvingen', 'Aanwezigheid', 'Aanwezigheid', 'manage_options', 'arrahma-aanwezigheid', 'arrahma_aanwezigheid_page' );
+}, 20 );
+
+/** Aantal actieve leerlingen per blok/groep. */
+function arrahma_actieve_aantallen_per_slot(): array {
+    global $wpdb;
+    $table = $wpdb->prefix . ARRAHMA_TABLE;
+    $rows  = $wpdb->get_results( "SELECT rooster, COUNT(*) AS cnt FROM {$table} WHERE rooster != '' AND status NOT IN ('afgewezen','uitgeschreven') GROUP BY rooster" );
+    $uit   = [];
+    foreach ( $rows as $row ) $uit[ $row->rooster ] = (int) $row->cnt;
+    return $uit;
+}
+
+/** Verwerkt één beheeractie op de Klassen-pagina en geeft een melding terug: [ ok, tekst ]. */
+function arrahma_klassen_actie( string $actie ): array {
+    global $wpdb;
+    $table   = $wpdb->prefix . ARRAHMA_TABLE;
+    $slots   = arrahma_roster_labels();
+    $klassen = arrahma_klassen();
+    $post    = function ( string $veld ): string { return trim( sanitize_text_field( wp_unslash( $_POST[ $veld ] ?? '' ) ) ); };
+    $naam    = function ( string $veld ) use ( $post ): string {
+        $n = $post( $veld );
+        return function_exists( 'mb_substr' ) ? mb_substr( $n, 0, ARRAHMA_KLASNAAM_MAX ) : substr( $n, 0, ARRAHMA_KLASNAAM_MAX );
+    };
+
+    switch ( $actie ) {
+        case 'klas_toevoegen':
+            $slot = $post( 'slot' );
+            $n    = $naam( 'naam' );
+            if ( ! isset( $slots[ $slot ] ) || $n === '' ) return [ false, 'Kies een groep en vul een naam in.' ];
+            $id = 'k' . substr( md5( uniqid( '', true ) ), 0, 10 );
+            $klassen[ $id ] = [ 'slot' => $slot, 'naam' => $n ];
+            update_option( ARRAHMA_KLASSEN_OPTION, $klassen, false );
+            return [ true, 'Klas "' . $n . '" toegevoegd. Deel de leerlingen hieronder in.' ];
+
+        case 'klas_hernoemen':
+            $id = $post( 'klas' );
+            $n  = $naam( 'naam' );
+            if ( ! isset( $klassen[ $id ] ) || $n === '' ) return [ false, 'Vul een naam in.' ];
+            $klassen[ $id ]['naam'] = $n;
+            update_option( ARRAHMA_KLASSEN_OPTION, $klassen, false );
+            return [ true, 'Klas hernoemd.' ];
+
+        case 'klas_verwijderen':
+            $id = $post( 'klas' );
+            if ( ! isset( $klassen[ $id ] ) ) return [ false, 'Klas niet gevonden.' ];
+            unset( $klassen[ $id ] );
+            update_option( ARRAHMA_KLASSEN_OPTION, $klassen, false );
+            $wpdb->update( $table, [ 'klas' => '' ], [ 'klas' => $id ], [ '%s' ], [ '%s' ] );
+            return [ true, 'Klas verwijderd. De leerlingen staan weer bij "Nog niet in een klas"; de aanwezigheid blijft bewaard.' ];
+
+        case 'indeling_opslaan':
+            $slot      = $post( 'slot' );
+            $geldig    = arrahma_klassen_van_slot( $slot );
+            $indeling  = isset( $_POST['indeling'] ) && is_array( $_POST['indeling'] ) ? wp_unslash( $_POST['indeling'] ) : [];
+            $in_slot   = array_map( 'intval', $wpdb->get_col( $wpdb->prepare( "SELECT id FROM {$table} WHERE rooster = %s", $slot ) ) );
+            $gewijzigd = 0;
+            foreach ( $indeling as $id => $klas ) {
+                $id   = (int) $id;
+                $klas = sanitize_key( $klas );
+                if ( ! in_array( $id, $in_slot, true ) || ( $klas !== '' && ! isset( $geldig[ $klas ] ) ) ) continue;
+                $gewijzigd += (int) $wpdb->update( $table, [ 'klas' => $klas ], [ 'id' => $id ], [ '%s' ], [ '%d' ] );
+            }
+            return [ true, 'Indeling opgeslagen (' . $gewijzigd . ' gewijzigd).' ];
+
+        case 'vakantie_toevoegen':
+            $n   = $naam( 'naam' );
+            $van = $post( 'van' );
+            $tot = $post( 'tot' );
+            if ( $n === '' || ! arrahma_geldige_datum( $van ) || ! arrahma_geldige_datum( $tot ) || $van > $tot ) {
+                return [ false, 'Vul een naam in en een geldige periode (van vóór tot).' ];
+            }
+            $slots = [];
+            if ( $post( 'bereik' ) === 'gekozen' ) {
+                $gekozen = isset( $_POST['vakantie_slots'] ) && is_array( $_POST['vakantie_slots'] ) ? array_map( 'sanitize_key', wp_unslash( $_POST['vakantie_slots'] ) ) : [];
+                $slots   = array_values( array_intersect( array_keys( arrahma_roster_labels() ), $gekozen ) );
+                if ( ! $slots ) return [ false, 'Kies minstens één groep, of kies "Alle groepen".' ];
+            }
+            $vakanties   = arrahma_vakanties();
+            $vakanties[] = [ 'naam' => $n, 'van' => $van, 'tot' => $tot, 'slots' => $slots ];
+            update_option( ARRAHMA_VAKANTIES_OPTION, $vakanties, false );
+            return [ true, 'Vakantie toegevoegd voor: ' . arrahma_vakantie_bereik( end( $vakanties ) ) . '.' ];
+
+        case 'vakantie_verwijderen':
+            $vakanties = arrahma_vakanties();
+            unset( $vakanties[ absint( $_POST['index'] ?? -1 ) ] );
+            update_option( ARRAHMA_VAKANTIES_OPTION, array_values( $vakanties ), false );
+            return [ true, 'Vakantie verwijderd.' ];
+
+        case 'uitzondering_toevoegen':
+            $slot  = $post( 'slot' );
+            $datum = $post( 'datum' );
+            $soort = $post( 'soort' ) === 'extra' ? 'extra' : 'vervalt';
+            if ( ! isset( $slots[ $slot ] ) || ! arrahma_geldige_datum( $datum ) ) return [ false, 'Kies een groep en een geldige datum.' ];
+            $lijst = array_values( array_filter( arrahma_les_uitzonderingen(), function ( $u ) use ( $slot, $datum ) {
+                return ! ( $u['slot'] === $slot && $u['datum'] === $datum ); // één uitzondering per groep per dag
+            } ) );
+            $lijst[] = [ 'slot' => $slot, 'datum' => $datum, 'soort' => $soort ];
+            update_option( ARRAHMA_LES_UITZ_OPTION, $lijst, false );
+            return [ true, $soort === 'extra' ? 'Extra les toegevoegd.' : 'Les laten vervallen.' ];
+
+        case 'uitzondering_verwijderen':
+            $lijst = arrahma_les_uitzonderingen();
+            unset( $lijst[ absint( $_POST['index'] ?? -1 ) ] );
+            update_option( ARRAHMA_LES_UITZ_OPTION, array_values( $lijst ), false );
+            return [ true, 'Uitzondering verwijderd.' ];
+
+        case 'docenten_opslaan':
+            $invoer = isset( $_POST['eenheden'] ) && is_array( $_POST['eenheden'] ) ? wp_unslash( $_POST['eenheden'] ) : [];
+            $geldig = arrahma_alle_eenheden();
+            foreach ( get_users( [ 'role' => ARRAHMA_DOCENT_ROLE, 'fields' => 'ID' ] ) as $user_id ) {
+                $gekozen = isset( $invoer[ $user_id ] ) && is_array( $invoer[ $user_id ] ) ? array_map( 'sanitize_key', $invoer[ $user_id ] ) : [];
+                $gekozen = array_values( array_filter( $gekozen, function ( $k ) use ( $geldig ) { return isset( $geldig[ $k ] ); } ) );
+                update_user_meta( (int) $user_id, ARRAHMA_DOCENT_META, $gekozen );
+            }
+            return [ true, 'Koppelingen van docenten opgeslagen.' ];
+    }
+    return [ false, 'Onbekende actie.' ];
+}
+
+function arrahma_klassen_page(): void {
+    if ( ! current_user_can( 'manage_options' ) ) return;
+
+    $tabs = [ 'klassen' => 'Klassen', 'docenten' => 'Docenten', 'rooster' => 'Lesrooster & vakanties' ];
+    $tab  = sanitize_key( $_GET['tab'] ?? 'klassen' );
+    if ( ! isset( $tabs[ $tab ] ) ) $tab = 'klassen';
+
+    $melding = null;
+    if ( isset( $_POST['arrahma_klassen_actie'] ) && check_admin_referer( 'arrahma_klassen' ) ) {
+        $melding = arrahma_klassen_actie( sanitize_key( wp_unslash( $_POST['arrahma_klassen_actie'] ) ) );
+    }
+    ?>
+    <div class="wrap">
+      <h1>Klassen &amp; docenten</h1>
+      <p style="color:#666;max-width:760px">Docenten houden de aanwezigheid bij op
+        <a href="<?= esc_url( arrahma_docenten_url() ) ?>" target="_blank"><?= esc_html( arrahma_docenten_url() ) ?></a>
+        — een gewone pagina van de website met de shortcode <code>[arrahma_docenten]</code>. Ze komen niet in dit beheerscherm.</p>
+      <?php if ( ! get_option( ARRAHMA_DOCENTEN_URL_OPTION ) ) : ?>
+        <div class="notice notice-warning"><p>De docentenpagina is nog niet gevonden. Maak een pagina (bijv. "Docenten", adres <code>/docenten</code>) met alleen de shortcode <code>[arrahma_docenten]</code> en bekijk hem één keer.</p></div>
+      <?php endif; ?>
+      <?php if ( $melding ) : ?>
+        <div class="notice notice-<?= $melding[0] ? 'success' : 'error' ?> is-dismissible"><p><?= esc_html( $melding[1] ) ?></p></div>
+      <?php endif; ?>
+      <nav class="nav-tab-wrapper">
+        <?php foreach ( $tabs as $sleutel => $label ) : ?>
+          <a href="<?= esc_url( admin_url( 'admin.php?page=arrahma-klassen&tab=' . $sleutel ) ) ?>" class="nav-tab <?= $tab === $sleutel ? 'nav-tab-active' : '' ?>"><?= esc_html( $label ) ?></a>
+        <?php endforeach; ?>
+      </nav>
+      <div style="max-width:980px;margin-top:1rem">
+        <?php
+        if ( $tab === 'klassen' ) arrahma_klassen_tab_klassen();
+        if ( $tab === 'docenten' ) arrahma_klassen_tab_docenten();
+        if ( $tab === 'rooster' ) arrahma_klassen_tab_rooster();
+        ?>
+      </div>
+    </div>
+    <?php
+}
+
+/** Opent een beheerformulier met nonce en actie. */
+function arrahma_klassen_form_open( string $actie, string $extra = '' ): string {
+    return '<form method="post"' . $extra . '>' . wp_nonce_field( 'arrahma_klassen', '_wpnonce', true, false )
+        . '<input type="hidden" name="arrahma_klassen_actie" value="' . esc_attr( $actie ) . '">';
+}
+
+function arrahma_klassen_tab_klassen(): void {
+    $aantal = arrahma_actieve_aantallen_per_slot();
+    $kaart  = 'background:#fff;border:1px solid #e0e0e0;border-radius:10px;padding:1rem 1.25rem;margin-bottom:1rem';
+
+    echo '<p style="color:#666">Zonder klassen is het hele lesblok één klas. Maak klassen aan als een blok over meerdere docenten wordt verdeeld, en deel daarna de leerlingen in.</p>';
+
+    foreach ( array_keys( arrahma_roster_labels() ) as $slot ) {
+        $klassen = arrahma_klassen_van_slot( $slot );
+        echo '<div style="' . $kaart . '"><h2 style="margin:0 0 .5rem;font-size:1.05rem">' . esc_html( arrahma_slot_naam( $slot ) )
+            . ' <span style="color:#888;font-weight:400">· ' . (int) ( $aantal[ $slot ] ?? 0 ) . ' leerlingen</span></h2>';
+
+        foreach ( $klassen as $id => $naam ) {
+            echo '<div style="display:flex;gap:.5rem;align-items:center;margin:.3rem 0">'
+                . arrahma_klassen_form_open( 'klas_hernoemen', ' style="display:flex;gap:.4rem"' )
+                . '<input type="hidden" name="klas" value="' . esc_attr( $id ) . '">'
+                . '<input type="text" name="naam" value="' . esc_attr( $naam ) . '" maxlength="' . ARRAHMA_KLASNAAM_MAX . '" required>'
+                . '<button class="button">Hernoemen</button></form>'
+                . arrahma_klassen_form_open( 'klas_verwijderen', ' onsubmit="return confirm(\'Klas verwijderen? De leerlingen komen weer bij Nog niet in een klas.\')"' )
+                . '<input type="hidden" name="klas" value="' . esc_attr( $id ) . '">'
+                . '<button class="button" style="color:#d32f2f;border-color:#d32f2f">Verwijderen</button></form></div>';
+        }
+
+        echo arrahma_klassen_form_open( 'klas_toevoegen', ' style="display:flex;gap:.4rem;margin:.5rem 0"' )
+            . '<input type="hidden" name="slot" value="' . esc_attr( $slot ) . '">'
+            . '<input type="text" name="naam" placeholder="Naam nieuwe klas, bijv. Klas A" maxlength="' . ARRAHMA_KLASNAAM_MAX . '" required>'
+            . '<button class="button">Klas toevoegen</button></form>';
+
+        if ( $klassen ) {
+            $leerlingen = arrahma_leerlingen_van_slot( $slot );
+            echo '<details' . ( $leerlingen ? ' open' : '' ) . '><summary style="cursor:pointer;margin:.5rem 0">Leerlingen indelen</summary>';
+            if ( ! $leerlingen ) {
+                echo '<p style="color:#888">Nog geen leerlingen in deze groep.</p>';
+            } else {
+                echo arrahma_klassen_form_open( 'indeling_opslaan' ) . '<input type="hidden" name="slot" value="' . esc_attr( $slot ) . '">'
+                    . '<table class="widefat striped" style="max-width:640px"><tbody>';
+                foreach ( $leerlingen as $rij ) {
+                    $huidig = isset( $klassen[ (string) $rij->klas ] ) ? (string) $rij->klas : '';
+                    echo '<tr><td>' . esc_html( trim( $rij->voornaam . ' ' . $rij->achternaam ) )
+                        . '<br><small style="color:#888">' . esc_html( arrahma_niveau_label( $rij->niveau ) ) . '</small></td><td>'
+                        . '<select name="indeling[' . (int) $rij->id . ']"><option value="">— nog niet in een klas —</option>';
+                    foreach ( $klassen as $id => $naam ) {
+                        echo '<option value="' . esc_attr( $id ) . '"' . selected( $huidig, $id, false ) . '>' . esc_html( $naam ) . '</option>';
+                    }
+                    echo '</select></td></tr>';
+                }
+                echo '</tbody></table><p><button class="button button-primary">Indeling opslaan</button></p></form>';
+            }
+            echo '</details>';
+        }
+        echo '</div>';
+    }
+}
+
+function arrahma_klassen_tab_docenten(): void {
+    $docenten = get_users( [ 'role' => ARRAHMA_DOCENT_ROLE, 'orderby' => 'display_name' ] );
+    $eenheden = arrahma_alle_eenheden();
+
+    echo '<p style="color:#666;max-width:760px">Een docent toevoegen: <a href="' . esc_url( admin_url( 'user-new.php' ) ) . '">Gebruikers → Nieuwe gebruiker</a>, '
+        . 'kies bij <strong>Rol</strong> "Docent" en laat WordPress de inlogmail sturen. Koppel de docent daarna hier aan een of meer groepen of klassen. '
+        . 'Stopt iemand, zet dan de rol op "Geen rol voor deze site" of verwijder het account.</p>';
+
+    if ( ! $docenten ) {
+        echo '<p><em>Er zijn nog geen docenten.</em></p>';
+        return;
+    }
+
+    echo arrahma_klassen_form_open( 'docenten_opslaan' );
+    foreach ( $docenten as $docent ) {
+        $gekozen = array_keys( arrahma_docent_eenheden( (int) $docent->ID ) );
+        echo '<fieldset style="background:#fff;border:1px solid #e0e0e0;border-radius:10px;padding:1rem 1.25rem;margin-bottom:1rem">'
+            . '<legend style="font-weight:600;padding:0 .35rem">' . esc_html( $docent->display_name ) . ' <span style="color:#888;font-weight:400">' . esc_html( $docent->user_email ) . '</span></legend>'
+            . '<input type="hidden" name="eenheden[' . (int) $docent->ID . '][]" value="">'
+            . '<div style="columns:2 320px;column-gap:1.5rem">';
+        foreach ( $eenheden as $sleutel => $eenheid ) {
+            $inspring = $eenheid['klas'] !== '' ? 'margin-left:1.4rem;' : 'margin-top:.35rem;';
+            echo '<label style="display:block;break-inside:avoid;' . $inspring . '"><input type="checkbox" name="eenheden[' . (int) $docent->ID . '][]" value="' . esc_attr( $sleutel ) . '"'
+                . checked( in_array( $sleutel, $gekozen, true ), true, false ) . '> ' . esc_html( $eenheid['label'] ) . '</label>';
+        }
+        echo '</div></fieldset>';
+    }
+    echo '<p><button class="button button-primary">Koppelingen opslaan</button></p></form>';
+}
+
+function arrahma_klassen_tab_rooster(): void {
+    $slots = arrahma_roster_labels();
+    $kaart = 'background:#fff;border:1px solid #e0e0e0;border-radius:10px;padding:1rem 1.25rem;margin-bottom:1rem';
+
+    echo '<p style="color:#666;max-width:760px">Lesdagen volgen vanzelf uit de dag van elke groep, het hele jaar door. Hier haal je vakanties eruit, '
+        . 'laat je een losse les vervallen of voeg je een extra les toe.</p>';
+
+    // ── Vakanties
+    echo '<div style="' . $kaart . '"><h2 style="margin-top:0;font-size:1.05rem">Vakanties</h2>'
+        . '<p style="color:#666;margin-top:0">Een vakantie geldt voor alle groepen, of alleen voor de blokken die je aanvinkt — bijvoorbeeld alleen de kinderen, of alleen de weekendblokken.</p>';
+    $vakanties = arrahma_vakanties();
+    if ( $vakanties ) {
+        echo '<table class="widefat striped"><tbody>';
+        foreach ( $vakanties as $i => $v ) {
+            echo '<tr><td><strong>' . esc_html( $v['naam'] ) . '</strong></td><td style="white-space:nowrap">' . esc_html( arrahma_format_date( $v['van'] ) . ' t/m ' . arrahma_format_date( $v['tot'] ) ) . '</td>'
+                . '<td style="color:#555">' . esc_html( arrahma_vakantie_bereik( $v ) ) . '</td><td style="text-align:right">'
+                . arrahma_klassen_form_open( 'vakantie_verwijderen' ) . '<input type="hidden" name="index" value="' . (int) $i . '"><button class="button-link" style="color:#d32f2f">Verwijderen</button></form></td></tr>';
+        }
+        echo '</tbody></table>';
+    }
+    echo arrahma_klassen_form_open( 'vakantie_toevoegen', ' id="arrahma-vakantie-form" style="margin-top:1rem;display:grid;gap:.75rem"' )
+        . '<div style="display:flex;gap:.5rem;flex-wrap:wrap;align-items:end">'
+        . '<label>Naam<br><input type="text" name="naam" placeholder="Herfstvakantie" required></label>'
+        . '<label>Van<br><input type="date" name="van" required></label>'
+        . '<label>Tot en met<br><input type="date" name="tot" required></label></div>'
+        . '<fieldset style="border:1px solid #e0e0e0;border-radius:8px;padding:.75rem 1rem"><legend style="padding:0 .35rem;font-weight:600">Voor wie?</legend>'
+        . '<label style="margin-right:1.25rem"><input type="radio" name="bereik" value="alle" checked> Alle groepen</label>'
+        . '<label><input type="radio" name="bereik" value="gekozen"> Alleen gekozen groepen</label>'
+        . '<div id="arrahma-vakantie-slots" hidden><div style="margin-top:.75rem;display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:.75rem 1.5rem">';
+    $per_doelgroep = [];
+    foreach ( array_keys( $slots ) as $slot ) $per_doelgroep[ arrahma_slot_doelgroep( $slot ) ][] = $slot;
+    foreach ( $per_doelgroep as $doelgroep => $groep_slots ) {
+        echo '<div><label style="display:block;font-weight:600;margin-bottom:.25rem"><input type="checkbox" class="arrahma-vak-alles"> ' . esc_html( $doelgroep ) . ' — alles</label>';
+        foreach ( $groep_slots as $slot ) {
+            echo '<label style="display:block;margin-left:1.4rem"><input type="checkbox" name="vakantie_slots[]" value="' . esc_attr( $slot ) . '"> ' . esc_html( arrahma_roster_label( $slot ) ) . '</label>';
+        }
+        echo '</div>';
+    }
+    echo '</div></div></fieldset><p style="margin:0"><button class="button">Vakantie toevoegen</button></p></form></div>';
+    ?>
+    <script>
+    (function () {
+      var form = document.getElementById('arrahma-vakantie-form');
+      if (!form) return;
+      var lijst = document.getElementById('arrahma-vakantie-slots');
+      form.querySelectorAll('input[name="bereik"]').forEach(function (r) {
+        r.addEventListener('change', function () { lijst.hidden = form.querySelector('input[name="bereik"]:checked').value !== 'gekozen'; });
+      });
+      // "Doelgroep — alles" vinkt alle blokken van die doelgroep aan of uit, en volgt ze terug.
+      lijst.querySelectorAll('.arrahma-vak-alles').forEach(function (alles) {
+        var blok = alles.closest('div'), items = blok.querySelectorAll('input[name="vakantie_slots[]"]');
+        alles.addEventListener('change', function () { items.forEach(function (i) { i.checked = alles.checked; }); });
+        items.forEach(function (i) { i.addEventListener('change', function () {
+          var aan = Array.prototype.filter.call(items, function (x) { return x.checked; }).length;
+          alles.checked = aan === items.length; alles.indeterminate = aan > 0 && aan < items.length;
+        }); });
+      });
+    })();
+    </script>
+    <?php
+
+    // ── Uitzonderingen per groep
+    echo '<div style="' . $kaart . '"><h2 style="margin-top:0;font-size:1.05rem">Losse les laten vervallen of extra les</h2>';
+    $lijst = arrahma_les_uitzonderingen();
+    if ( $lijst ) {
+        echo '<table class="widefat striped"><tbody>';
+        foreach ( $lijst as $i => $u ) {
+            echo '<tr><td>' . esc_html( arrahma_datum_lang( $u['datum'] ) ) . '</td><td>' . esc_html( arrahma_slot_naam( $u['slot'] ) ) . '</td><td>'
+                . ( $u['soort'] === 'extra' ? 'Extra les' : 'Vervalt' ) . '</td><td style="text-align:right">'
+                . arrahma_klassen_form_open( 'uitzondering_verwijderen' ) . '<input type="hidden" name="index" value="' . (int) $i . '"><button class="button-link" style="color:#d32f2f">Verwijderen</button></form></td></tr>';
+        }
+        echo '</tbody></table>';
+    }
+    echo arrahma_klassen_form_open( 'uitzondering_toevoegen', ' style="display:flex;gap:.5rem;flex-wrap:wrap;align-items:end;margin-top:.75rem"' )
+        . '<label>Groep<br><select name="slot" required><option value="">— kies —</option>';
+    foreach ( array_keys( $slots ) as $slot ) {
+        echo '<option value="' . esc_attr( $slot ) . '">' . esc_html( arrahma_slot_naam( $slot ) ) . '</option>';
+    }
+    echo '</select></label><label>Datum<br><input type="date" name="datum" required></label>'
+        . '<label>Soort<br><select name="soort"><option value="vervalt">Les vervalt</option><option value="extra">Extra les</option></select></label>'
+        . '<button class="button">Toevoegen</button></form></div>';
+
+    // ── Controle: eerstvolgende lessen per groep
+    echo '<div style="' . $kaart . '"><h2 style="margin-top:0;font-size:1.05rem">Eerstvolgende lessen</h2><table class="widefat striped"><tbody>';
+    foreach ( array_keys( $slots ) as $slot ) {
+        $data  = [];
+        $datum = arrahma_verschuif_datum( arrahma_vandaag(), -1 );
+        for ( $i = 0; $i < 3; $i++ ) {
+            $datum = arrahma_zoek_les( $slot, $datum, 1 );
+            if ( ! $datum ) break;
+            $data[] = arrahma_datum_kort( $datum );
+        }
+        echo '<tr><td>' . esc_html( arrahma_slot_naam( $slot ) ) . '</td><td>' . esc_html( $data ? implode( ', ', $data ) : 'geen les gevonden' ) . '</td></tr>';
+    }
+    echo '</tbody></table></div>';
+}
+
+// ── Beheer: aanwezigheidsoverzicht en export ─────────────────
+
+/** Periode uit de URL, standaard de afgelopen ARRAHMA_SIGNAAL_WEKEN weken. */
+function arrahma_periode_uit_request(): array {
+    $tot = sanitize_text_field( wp_unslash( $_GET['tot'] ?? '' ) );
+    $van = sanitize_text_field( wp_unslash( $_GET['van'] ?? '' ) );
+    if ( ! arrahma_geldige_datum( $tot ) ) $tot = arrahma_vandaag();
+    if ( ! arrahma_geldige_datum( $van ) ) $van = arrahma_verschuif_datum( $tot, -7 * ARRAHMA_SIGNAAL_WEKEN );
+    if ( $van > $tot ) [ $van, $tot ] = [ $tot, $van ];
+    return [ $van, $tot ];
+}
+
+add_action( 'admin_init', function () {
+    if ( ( $_GET['page'] ?? '' ) !== 'arrahma-aanwezigheid' || ! current_user_can( 'manage_options' ) ) return;
+    if ( ! isset( $_GET['export'], $_GET['_wpnonce'] ) ) return;
+    if ( ! wp_verify_nonce( sanitize_text_field( wp_unslash( $_GET['_wpnonce'] ) ), 'arrahma_export_aanwezigheid' ) ) return;
+
+    $soort = sanitize_key( $_GET['export'] );
+    if ( $soort === 'aanwezigheid' ) {
+        $alles = ! empty( $_GET['alles'] );
+        [ $van, $tot ] = arrahma_periode_uit_request();
+        arrahma_export_aanwezigheid_csv( $alles ? '' : $van, $alles ? '' : $tot );
+        exit;
+    }
+    if ( $soort === 'notities' ) {
+        arrahma_export_notities_csv();
+        exit;
+    }
+} );
+
+function arrahma_csv_start( string $naam ) {
+    header( 'Content-Type: text/csv; charset=utf-8' );
+    header( 'Content-Disposition: attachment; filename="' . $naam . '-' . date( 'Y-m-d' ) . '.csv"' );
+    header( 'Pragma: no-cache' );
+    $out = fopen( 'php://output', 'w' );
+    fprintf( $out, chr( 0xEF ) . chr( 0xBB ) . chr( 0xBF ) ); // UTF-8 BOM voor Excel
+    return $out;
+}
+
+function arrahma_export_aanwezigheid_csv( string $van, string $tot ): void {
+    global $wpdb;
+    $a     = $wpdb->prefix . ARRAHMA_AANWEZIG_TABLE;
+    $i     = $wpdb->prefix . ARRAHMA_TABLE;
+    $where = $van !== '' ? $wpdb->prepare( 'WHERE a.lesdatum BETWEEN %s AND %s', $van, $tot ) : '';
+    $rows  = $wpdb->get_results(
+        "SELECT a.*, i.voornaam, i.achternaam, i.inschrijving_voor, i.klas, i.rooster AS rooster_nu
+         FROM {$a} a LEFT JOIN {$i} i ON i.id = a.inschrijving_id {$where}
+         ORDER BY a.lesdatum, a.rooster, i.voornaam, i.achternaam"
+    );
+    $labels = arrahma_aanwezig_statussen();
+    $cats   = arrahma_category_labels();
+
+    $out = arrahma_csv_start( 'aanwezigheid' );
+    fputcsv( $out, [ 'Lesdatum', 'Groep', 'Klas (nu)', 'Voornaam', 'Achternaam', 'Doelgroep', 'Status', 'Ingevuld door', 'Gewijzigd op' ], ';' );
+    foreach ( $rows as $r ) {
+        $klas = $r->rooster_nu === $r->rooster ? ( arrahma_klassen_van_slot( (string) $r->rooster )[ (string) $r->klas ] ?? '' ) : '';
+        fputcsv( $out, [
+            $r->lesdatum,
+            arrahma_roster_label( $r->rooster ),
+            $klas,
+            $r->voornaam ?? '(verwijderd)',
+            $r->achternaam ?? '',
+            $cats[ $r->inschrijving_voor ?? '' ] ?? '',
+            $labels[ $r->status ] ?? $r->status,
+            arrahma_gebruiker_naam( (int) $r->door ),
+            $r->gewijzigd_op,
+        ], ';' );
+    }
+    fclose( $out );
+}
+
+function arrahma_export_notities_csv(): void {
+    global $wpdb;
+    $n    = $wpdb->prefix . ARRAHMA_NOTITIE_TABLE;
+    $i    = $wpdb->prefix . ARRAHMA_TABLE;
+    $rows = $wpdb->get_results(
+        "SELECT n.*, i.voornaam, i.achternaam, i.rooster FROM {$n} n LEFT JOIN {$i} i ON i.id = n.inschrijving_id
+         ORDER BY n.aangemaakt_op"
+    );
+
+    $out = arrahma_csv_start( 'notities' );
+    fputcsv( $out, [ 'Datum', 'Voornaam', 'Achternaam', 'Groep', 'Auteur', 'Notitie', 'Aangepast op' ], ';' );
+    foreach ( $rows as $r ) {
+        fputcsv( $out, [
+            $r->aangemaakt_op,
+            $r->voornaam ?? '(verwijderd)',
+            $r->achternaam ?? '',
+            arrahma_roster_label( (string) ( $r->rooster ?? '' ) ),
+            arrahma_gebruiker_naam( (int) $r->auteur ),
+            $r->tekst,
+            $r->gewijzigd_op ?? '',
+        ], ';' );
+    }
+    fclose( $out );
+}
+
+/** Leerlingen met vaak "afwezig" (zonder bericht) in de afgelopen weken. */
+function arrahma_signaallijst(): array {
+    global $wpdb;
+    $a = $wpdb->prefix . ARRAHMA_AANWEZIG_TABLE;
+    $i = $wpdb->prefix . ARRAHMA_TABLE;
+    return $wpdb->get_results( $wpdb->prepare(
+        "SELECT i.*, s.aantal, s.laatste
+         FROM ( SELECT inschrijving_id, COUNT(*) AS aantal, MAX(lesdatum) AS laatste
+                FROM {$a} WHERE status = 'afwezig' AND lesdatum >= %s
+                GROUP BY inschrijving_id HAVING COUNT(*) >= %d ) s
+         JOIN {$i} i ON i.id = s.inschrijving_id
+         WHERE i.status NOT IN ('afgewezen','uitgeschreven')
+         ORDER BY s.aantal DESC, s.laatste DESC",
+        arrahma_verschuif_datum( arrahma_vandaag(), -7 * ARRAHMA_SIGNAAL_WEKEN ),
+        ARRAHMA_SIGNAAL_DREMPEL
+    ) );
+}
+
+function arrahma_aanwezigheid_page(): void {
+    if ( ! current_user_can( 'manage_options' ) ) return;
+    $kaart = 'background:#fff;border:1px solid #e0e0e0;border-radius:10px;padding:1rem 1.25rem;margin-bottom:1rem';
+    [ $van, $tot ] = arrahma_periode_uit_request();
+    $export = function ( array $args ) {
+        return wp_nonce_url( add_query_arg( $args, admin_url( 'admin.php?page=arrahma-aanwezigheid' ) ), 'arrahma_export_aanwezigheid' );
+    };
+    ?>
+    <div class="wrap" style="max-width:1200px">
+      <h1>Aanwezigheid</h1>
+      <p><a class="button" href="<?= esc_url( arrahma_docenten_url() ) ?>" target="_blank">Docentenpagina openen</a>
+         <a class="button" href="<?= esc_url( $export( [ 'export' => 'aanwezigheid', 'van' => $van, 'tot' => $tot ] ) ) ?>">Export aanwezigheid (deze periode)</a>
+         <a class="button" href="<?= esc_url( $export( [ 'export' => 'aanwezigheid', 'alles' => 1 ] ) ) ?>">Export aanwezigheid (alles)</a>
+         <a class="button" href="<?= esc_url( $export( [ 'export' => 'notities' ] ) ) ?>">Export notities</a></p>
+
+      <div style="<?= $kaart ?>">
+        <h2 style="margin-top:0;font-size:1.05rem">Signaallijst — <?= (int) ARRAHMA_SIGNAAL_DREMPEL ?>× of vaker afwezig zonder bericht in de afgelopen <?= (int) ARRAHMA_SIGNAAL_WEKEN ?> weken</h2>
+        <?php arrahma_render_signaallijst(); ?>
+      </div>
+
+      <div style="<?= $kaart ?>">
+        <h2 style="margin-top:0;font-size:1.05rem">Per groep</h2>
+        <?php arrahma_render_aanwezigheid_matrix( $van, $tot ); ?>
+      </div>
+    </div>
+    <?php
+}
+
+function arrahma_render_signaallijst(): void {
+    $lijst = arrahma_signaallijst();
+    if ( ! $lijst ) {
+        echo '<p style="color:#888">Niemand op de lijst.</p>';
+        return;
+    }
+    echo '<table class="widefat striped"><thead><tr><th>Leerling</th><th>Groep</th><th>Afwezig</th><th>Laatst</th><th>Bellen</th></tr></thead><tbody>';
+    foreach ( $lijst as $r ) {
+        $detail = add_query_arg( 'leerling', (int) $r->id, arrahma_docenten_url() );
+        $bellen = $r->telefoon;
+        if ( ! empty( $r->cp_anders ) && $r->cp_telefoon ) {
+            $bellen = trim( $r->cp_voornaam . ' ' . $r->cp_achternaam ) . ': ' . $r->cp_telefoon . ( $r->telefoon ? ' · ' . $r->telefoon : '' );
+        }
+        echo '<tr><td><a href="' . esc_url( $detail ) . '" target="_blank">' . esc_html( trim( $r->voornaam . ' ' . $r->achternaam ) ) . '</a></td>'
+            . '<td>' . esc_html( arrahma_slot_naam( (string) $r->rooster ) ) . '</td>'
+            . '<td><strong>' . (int) $r->aantal . '×</strong></td>'
+            . '<td>' . esc_html( arrahma_format_date( $r->laatste ) ) . '</td>'
+            . '<td>' . esc_html( $bellen ) . '</td></tr>';
+    }
+    echo '</tbody></table>';
+}
+
+function arrahma_render_aanwezigheid_matrix( string $van, string $tot ): void {
+    global $wpdb;
+    $eenheden = arrahma_alle_eenheden();
+    $sleutel  = sanitize_key( $_GET['eenheid'] ?? '' );
+    ?>
+    <form method="get" style="display:flex;gap:.5rem;flex-wrap:wrap;align-items:end;margin-bottom:1rem">
+      <input type="hidden" name="page" value="arrahma-aanwezigheid">
+      <label>Groep<br><select name="eenheid"><option value="">— kies —</option>
+        <?php foreach ( $eenheden as $k => $e ) : ?>
+          <option value="<?= esc_attr( $k ) ?>" <?= selected( $sleutel, $k, false ) ?>><?= esc_html( $e['label'] ) ?></option>
+        <?php endforeach; ?>
+      </select></label>
+      <label>Van<br><input type="date" name="van" value="<?= esc_attr( $van ) ?>"></label>
+      <label>Tot en met<br><input type="date" name="tot" value="<?= esc_attr( $tot ) ?>"></label>
+      <button class="button button-primary">Toon</button>
+    </form>
+    <?php
+    $eenheid = $eenheden[ $sleutel ] ?? null;
+    if ( ! $eenheid ) return;
+
+    if ( arrahma_verschuif_datum( $van, ARRAHMA_MAX_PERIODE_DAGEN ) < $tot ) {
+        $van = arrahma_verschuif_datum( $tot, -ARRAHMA_MAX_PERIODE_DAGEN );
+        echo '<p style="color:#888">Periode ingekort tot ' . (int) ARRAHMA_MAX_PERIODE_DAGEN . ' dagen, vanaf ' . esc_html( arrahma_format_date( $van ) ) . '. Gebruik de export voor langere periodes.</p>';
+    }
+
+    $slot    = $eenheid['slot'];
+    $data    = arrahma_lesdata_in_periode( $slot, $van, $tot );
+    $secties = arrahma_eenheid_secties( $eenheid );
+    $table   = $wpdb->prefix . ARRAHMA_AANWEZIG_TABLE;
+    $rows    = $wpdb->get_results( $wpdb->prepare(
+        "SELECT inschrijving_id, lesdatum, status FROM {$table} WHERE rooster = %s AND lesdatum BETWEEN %s AND %s",
+        $slot, $van, $tot
+    ) );
+    $raster = [];
+    foreach ( $rows as $r ) $raster[ (int) $r->inschrijving_id ][ $r->lesdatum ] = $r->status;
+
+    $letters = arrahma_aanwezig_letters();
+    $kleuren = arrahma_aanwezig_kleuren();
+    $labels  = arrahma_aanwezig_statussen();
+
+    if ( ! $data ) {
+        echo '<p style="color:#888">Geen lessen in deze periode.</p>';
+        return;
+    }
+
+    echo '<p style="color:#666">';
+    foreach ( $letters as $status => $letter ) {
+        echo '<strong style="color:' . esc_attr( $kleuren[ $status ] ) . '">' . esc_html( $letter ) . '</strong> ' . esc_html( $labels[ $status ] ) . ' &nbsp; ';
+    }
+    echo '· niet ingevuld</p><div style="overflow-x:auto"><table class="widefat striped" style="width:auto;white-space:nowrap"><thead><tr><th>Leerling</th>';
+    foreach ( $data as $d ) {
+        echo '<th style="text-align:center;font-size:.75rem">' . esc_html( arrahma_datum_kort( $d ) ) . '</th>';
+    }
+    foreach ( $letters as $status => $letter ) {
+        echo '<th style="text-align:center;color:' . esc_attr( $kleuren[ $status ] ) . '">' . esc_html( $letter ) . '</th>';
+    }
+    echo '</tr></thead><tbody>';
+
+    foreach ( $secties as $sectie ) {
+        if ( $sectie['titel'] !== '' ) {
+            echo '<tr><td colspan="' . ( count( $data ) + 5 ) . '" style="font-weight:600;background:#f4f6f8">' . esc_html( $sectie['titel'] ) . '</td></tr>';
+        }
+        foreach ( $sectie['rijen'] as $rij ) {
+            $telling = array_fill_keys( array_keys( $letters ), 0 );
+            echo '<tr><td>' . esc_html( trim( $rij->voornaam . ' ' . $rij->achternaam ) ) . '</td>';
+            foreach ( $data as $d ) {
+                $status = $raster[ (int) $rij->id ][ $d ] ?? '';
+                if ( isset( $telling[ $status ] ) ) $telling[ $status ]++;
+                echo $status !== ''
+                    ? '<td style="text-align:center;font-weight:700;color:' . esc_attr( $kleuren[ $status ] ?? '#888' ) . '" title="' . esc_attr( $labels[ $status ] ?? $status ) . '">' . esc_html( $letters[ $status ] ?? '?' ) . '</td>'
+                    : '<td style="text-align:center;color:#ccc">·</td>';
+            }
+            foreach ( $telling as $aantal ) echo '<td style="text-align:center">' . (int) $aantal . '</td>';
+            echo '</tr>';
+        }
+    }
+    echo '</tbody></table></div>';
 }

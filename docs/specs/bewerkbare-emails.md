@@ -91,6 +91,19 @@ Meegenomen bugfix: `arrahma_names_from_rows()` las alleen objecten, terwijl de a
 Sinds de aanspreekvorm-wijziging stond in élke bevestiging na een kinderaanmelding een lege naam
 ("…de inschrijving van ."). Opgelost.
 
+## Bijlagen (1.17.0)
+
+Op **Inschrijvingen → E-mails** kun je Word-, Excel- en PDF-bestanden (`pdf doc docx xls xlsx`) uit de
+mediabibliotheek meesturen: max. `ARRAHMA_BIJLAGE_MAX` (5) bestanden, samen max. `ARRAHMA_BIJLAGE_MAX_MB`
+(10 MB). Elke ontvanger krijgt dezelfde bijlagen; ze gaan ook mee met de testmail.
+
+- Kiezen: `wp.media` (geladen met `wp_enqueue_media()` alleen op die pagina), gefilterd op de vijf mimetypes.
+- Server: `arrahma_bijlagen_uit_request()` controleert elk media-id (bestaat, leesbaar, juiste extensie,
+  totale grootte). Een fout blokkeert het versturen — in de AJAX-batch, het pad zonder JS en de testmail.
+- Doorgifte: `arrahma_send_to_recipient( …, $bijlagen )` → `arrahma_send_template_email( …, $bijlagen )` →
+  `arrahma_wp_mail( …, $bijlagen )` → `wp_mail()` attachments.
+- Bestanden in de mediabibliotheek zijn via hun URL openbaar; de pagina waarschuwt daarvoor.
+
 ## Verificatie (test-WordPress in Docker)
 
 - `php -l` op 8.2 en 7.2 schoon.
