@@ -15,6 +15,7 @@ door de vereniging benaderd; het systeem mailt ouders niet.
 | Waar werken docenten? | Aparte pagina op de website (`/docenten`) achter de WordPress-login. Géén wp-admin. |
 | Wat zien docenten? | Persoonsgegevens van leerling en contactpersoon. **Geen** bankgegevens of betaalwijze. |
 | Wie is het bestuur? | Wie inlogt met een beheerdersaccount (`manage_options`). Geen aparte bestuursrol. |
+| Wie maakt klassen? | Beheerders én **coördinatoren**: een docentaccount (mag gedeeld zijn) met de capability `arrahma_klassen_beheren`, aan te zetten per account in wp-admin. Zij regelen de klassen van hun eigen blokken op /docenten zelf. |
 | Wie leest notities? | Alle docenten van die leerling en het bestuur. |
 | Ouders bij afwezigheid | Handmatig; geen automatische mail. |
 | Bewaren | Geen automatische verwijdering; export als CSV. Bewaartermijn bepaalt de vereniging zelf. |
@@ -59,14 +60,21 @@ Pagina-layout in WordPress: **Elementor Canvas** (geen header/footer van thema o
 | Scherm | URL-parameters | Inhoud |
 |---|---|---|
 | Inloggen | — | websitelogo (`ARRAHMA_LOGO_PAD` in uploads, filter `arrahma_docenten_logo_url`), WordPress-inlogformulier, "Ingelogd blijven" standaard uit |
-| Mijn groepen | — | les(sen) van vandaag als grote kaart ("Presentie opnemen" / "Verder · x van y" / "Bekijken"), **Nog in te vullen** (verstreken lessen van de afgelopen `ARRAHMA_OPEN_DAGEN` dagen die niet compleet zijn, max. `ARRAHMA_OPEN_MAX`), overige groepen met volgende les. Bestuur: knop naar het maandoverzicht. Iedereen komt hier eerst, ook met één groep, zodat de to-do zichtbaar is. |
-| Presentielijst | `eenheid`, `datum` | Lijst/Kalender-schakelaar, vorige/volgende les, voortgangsbalk en tellingen, per leerling vier ronde knoppen met eigen icoon (✓ klok envelop ✕) en de status in woorden, "Nog niet in een klas"-sectie, vaste balk onderaan met opslagstatus en "Rest op aanwezig". Opslaan per tik via `wp_ajax_arrahma_aanwezigheid`; nogmaals tikken wist; mislukt → rij rood met reden. |
+| Mijn groepen | — | Kop met drie cijfers (lessen vandaag · niet ingevuld · groepen); filters **Alle · Niet ingevuld · Vandaag**; groepen per hoofdgroep (Kinderen, Broeders, Zusters) in inklapbare secties, één regel per groep ("Klas A · za & zo 09:00", volgende les, badge **Vandaag** / **N open** / **✓ bij**). Volgorde: vandaag, dan met open lessen, dan op volgende les. Tik: vandaag → les van vandaag; open → oudste open les; anders de groep. Bij meer dan 8 groepen gaan rustige secties dicht. Bestuur ziet klassen i.p.v. het hele blok (zoals in het maandoverzicht) en een knop naar het maandoverzicht. |
+| Presentielijst | `eenheid`, `datum` | Lijst/Kalender-schakelaar, vorige/volgende les, voortgangsbalk en tellingen, per leerling een selectievakje plus vier ronde knoppen met eigen icoon (✓ klok envelop ✕) en de status in woorden, "Nog niet in een klas"-sectie. Opslaan per tik via `wp_ajax_arrahma_aanwezigheid`; nogmaals tikken wist; mislukt → rij rood met reden. |
+| Presentielijst · bulk | — | "Alles selecteren" bovenaan; zodra er iets is aangevinkt verschijnt onderaan een balk met het aantal, "Selectie wissen" en de vier statussen + **Leegmaken**. Die zet de status voor alle gekozen leerlingen, één verzoek per leerling, en wist daarna de selectie. (Verving "Rest op aanwezig".) |
+| Klassen beheren | `beheer=klassen`, `slot` | Alleen voor wie dat blok mag beheren (`arrahma_mag_klassen()`): klassen aanmaken, hernoemen en verwijderen. Leerlingen indelen gaat met hetzelfde selectiepatroon als de presentielijst: filters (Alle · Nog niet ingedeeld · per klas), vinkjes met "Alles selecteren" (alleen wat het filter toont), en onderaan een balk met één keuzelijst **Verplaatsen naar…** (inclusief "Uit de klas halen") plus de knop **Verplaatsen** — één keuzelijst in plaats van een knop per klas, zodat de balk even groot blijft bij 2 of bij 20 klassen. Actie `indeling_bulk`; alleen leerlingen van dat blok en klassen van dat blok worden geraakt. Zonder JavaScript blijft alles zichtbaar en werkt het formulier gewoon. Knop "Klassen beheren" staat in de kop van de presentielijst en de kalender. Formulieren lopen via `arrahma_verwerk_beheer_post()` (nonce per blok) en hergebruiken `arrahma_klassen_actie()`, dezelfde logica als wp-admin. |
 | Kalender | `eenheid`, `weergave=kalender`, `maand=JJJJ-MM` | maandraster; per lesdag compleet / deels / niet ingevuld / nog niet geweest, aantal afwezig; vakanties gearceerd met naam, vervallen les doorgestreept, extra les gelabeld, vandaag goud omrand; tik → presentielijst van die dag. |
 | Leerling | `leerling`, `eenheid` | kop met initialen, bel- en mailknop (contactpersoon eerst), aanwezigheid (tellingen, strip laatste 8 lessen in letters, alle lessen), notities (toevoegen; eigen aanpassen/verwijderen, bestuur alles), contact & gegevens. Geen bankgegevens. |
 | Maandoverzicht (alleen bestuur) | `bestuur=1`, `maand` | rij per groep/klas × kolom per dag, zelfde tekens als de kalender, vakantieband, vandaag getint; zijbalk: % lessen compleet, % aanwezig of te laat, niet ingevulde lessen, vaak afwezig zonder bericht. |
 
 Lege toestanden zeggen waarom er niets staat en bieden de volgende stap (vakantie → volgende les, nog
 niet begonnen, niet gekoppeld, geen leerlingen).
+
+**Open lessen** (`arrahma_open_lessen()`): verstreken lessen van de afgelopen `ARRAHMA_OPEN_DAGEN` dagen die niet
+compleet zijn, maar pas vanaf de eerste les waarvoor die groep ooit iets heeft ingevuld (`arrahma_eerste_lesdata()`).
+Er is geen startdatum per groep; zo telt een groep die nog niet begonnen is niet als achterstand. Het maandoverzicht
+(percentages en "Niet ingevuld") volgt dezelfde regel.
 
 Voltooiing van een les (`arrahma_voltooiing()`): telt de leerlingen die nu op de lijst van die eenheid
 staan (inclusief "nog niet in een klas") tegen de registraties van die dag.
@@ -87,8 +95,10 @@ Alles afgeschermd onder `.arr-doc`. De pagina-URL wordt vastgelegd in optie `arr
 
 ### Beheer (wp-admin, alleen beheerders)
 - **Inschrijvingen → Klassen & docenten**: tabbladen *Klassen* (aanmaken, hernoemen, verwijderen,
-  leerlingen indelen), *Docenten* (koppelen aan groepen/klassen), *Lesrooster & vakanties* (vakanties,
-  uitzonderingen, controlelijst eerstvolgende lessen).
+  leerlingen indelen), *Docenten* (koppelen aan groepen/klassen én het vinkje **Coördinator**:
+  `arrahma_klassen_beheren` op dat account), *Lesrooster & vakanties* (vakanties, uitzonderingen,
+  controlelijst eerstvolgende lessen). Klassen kunnen ook op /docenten worden beheerd; beide schermen
+  gebruiken dezelfde `arrahma_klassen_actie()`.
 - **Inschrijvingen → Aanwezigheid**: signaallijst (≥ 3× "Afwezig" in 8 weken, met telefoonnummers),
   overzicht per groep (leerlingen × lessen, max. 190 dagen), exports: aanwezigheid (periode of alles) en
   notities.
